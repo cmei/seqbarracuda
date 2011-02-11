@@ -7,7 +7,7 @@
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
-   as published by the Free Software Foundation; either version 2
+   as published by the Free Software Foundation; either version 3
    of the License, or (at your option) any later version.
 
    This program is distributed in the hope that it will be useful,
@@ -94,7 +94,6 @@ unsigned long long copy_bwts_to_cuda_memory( const char * prefix, unsigned int *
 	bwt_t * bwt_src;
 	char str[100];
 	unsigned long long size_read = 0;
-
 
 	if ( bwt != 0 )
 	{
@@ -1042,7 +1041,7 @@ __device__ void cuda_dfs_push(uint4 *stack, uchar4 *stack_mm, char4 *pushes, int
 	return;
 }
 __device__ int cuda_dfs_match(const int len, const unsigned char *str, const int sequence_type, unsigned int *widths, unsigned char *bids, const gap_opt_t *opt, alignment_store_t *aln, int best_score, const int max_aln)
-//This function try to find the alignment of the sequence and returns SA coordinates, no. of mismatches, gap openings and extensions
+//This function tries to find the alignment of the sequence and returns SA coordinates, no. of mismatches, gap openings and extensions
 //It uses a depth-first search approach rather than breath-first as the memory available in CUDA is far less than in CPU mode
 //The search rooted from the last char [len] of the sequence to the first with the whole bwt as a ref from start
 //and recursively narrow down the k(upper) & l(lower) SA boundaries until it reaches the first char [i = 0], if k<=l then a match is found.
@@ -1239,7 +1238,7 @@ __device__ int cuda_dfs_match(const int len, const unsigned char *str, const int
 			}
 		}
 
-		//donepushtypes store information for each stage whether a prospective daughter node has been evaluated or not
+		//donepushtypes stores information for each stage whether a prospective daughter node has been evaluated or not
 		//donepushtypes[current_stage].x  exact match, =0 not done, =1 done
 		//donepushtypes[current_stage].y  mismatches, 0 not done, =no of eligible cs with a k<=l done
 		//donepushtypes[current_stage].z  deletions, =0 not done, =no of eligible cs with a k<=l done
@@ -1726,7 +1725,7 @@ __global__ void cuda_inexact_match_caller(int no_of_sequences, unsigned short ma
 
 
 __global__ void cuda_directional_inexact_match_caller(int no_of_sequences, unsigned short max_sequence_length, alignment_store_t* global_alignment_store, unsigned char cuda_opt)
-//CUDA kernal for inexact match on both strands
+//CUDA kernal for inexact match on a specified strand
 //calls bwt_cuda_device_calculate_width to determine the boundaries of the search space
 //and then calls dfs_match to search for alignment using dfs approach
 {
@@ -2385,6 +2384,8 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 		total_time_used += time_used;
 		fprintf(stderr, "[bwa_aln_core] Finished loading reference sequence in %0.2fs.\n", time_used );
 
+
+		//main loop
 		gettimeofday (&start, NULL);
 		while ((seqs = bwa_read_seq(ks, 0x40000, &no_of_sequences, opt->mode & BWA_MODE_COMPREAD, opt->mid)) != 0)
 		{
@@ -2613,7 +2614,7 @@ void bwa_deviceQuery()
 
 	if (num_devices)
 		{
-			  //fprintf(stdout,"[deviceQuery] Querying CUDA devices:\n");
+			  fprintf(stderr,"[deviceQuery] Querying CUDA devices:\n");
 			  for (device = 0; device < num_devices; device++)
 			  {
 					  cudaDeviceProp properties;
@@ -2622,7 +2623,7 @@ void bwa_deviceQuery()
 					  fprintf(stdout, "%d %d%d\n", int(properties.totalGlobalMem/1048576), int(properties.major),  int(properties.minor));
 
 			  }
-			 // fprintf(stdout,"[total] %d\n", device);
+			  fprintf(stderr,"[total] %d\n", device);
 		}
 //cudaSetDevice(0);
 	return;
