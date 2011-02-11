@@ -33,6 +33,7 @@ NV_ROOT_PATH := $(HOME)/NVIDIA_CUDA_SDK
 SYSTEM        = $(subst ' ',_,$(shell uname | tr A-Z a-z))
 PROJECT_PATH ?= .
 EXECUTABLE   ?= $(lastword $(subst /, ,$(PWD)))
+#EXCUTABLE ?= barracuda
 BINDIR       ?= $(SYSTEM)
 ROOTOBJDIR   ?= $(SYSTEM)
 
@@ -177,7 +178,8 @@ else
 		CFLAGS			+= -D__DEVICE_EMULATION__
 	endif
 	TARGETDIR := $(BINDIR)/$(BINSUBDIR)
-	TARGET    := $(TARGETDIR)/$(EXECUTABLE)
+#	TARGET    := $(TARGETDIR)/$(EXECUTABLE)
+	TARGET    := $(TARGETDIR)/barracuda
 	LINKLINE  = $(LINK) -o $(TARGET) $(OBJS) $(LIB)
 endif
 
