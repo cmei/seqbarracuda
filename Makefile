@@ -44,8 +44,6 @@ else
 verbose = 0
 dbg = 0
 endif
-
-
 ################################################################################
 # Below is from commom.mk
 ################################################################################
@@ -58,8 +56,15 @@ endif
 
 .SUFFIXES : .cu .cu_dbg.o .c_dbg.o .cpp_dbg.o .cu_rel.o .c_rel.o .cpp_rel.o .cubin .ptx
 
-# Add new SM Versions here as devices with new Compute Capability are released
+################################################################################
+# Add option to choose GPU arch
+################################################################################
+
+ifeq ($(Arch),sm_20)
+SM_VERSIONS := sm_20 # Compile sm_20 optimized code for fermi or above
+else
 SM_VERSIONS := sm_13 # Only device with 1.3 or above is supported.
+endif
 
 CUDA_INSTALL_PATH ?= /usr/local/cuda
 
