@@ -1,0 +1,97 @@
+#!/bin/bash
+
+#### Register barracuda executable path
+barracudaExec=barracuda
+#[ ! -f $barracudaExec ] && echo "Cannot find barracuda executable" && exit 1
+
+#### Clean script
+clean()
+{
+  echo Cleaning . . .
+  [ `ps | grep -c execRun.sh` -ne 0 ] && killall execRun.sh
+  [ `ps | grep -c barracuda` -ne 0 ] && killall barracuda
+  [ -f devices.txt ] && rm -f devices.txt 
+  [ -f execList ] && rm -f execList.txt 
+  [ -f finished ] && rm -f finished 
+  [ -f execRun.sh ] && rm -f execRun.sh
+}
+
+#### Trap interrupt
+intDetect()
+{
+  echo Break!
+  clean
+  exit 1
+}
+
+#### Trap signal
+trap 'intDetect' SIGINT SIGTERM
+
+#### sanity check
+[ "$1" == "" -o "$2" == "" -o "$3" == "" -o "$4" == "" ] && echo $0 reference input1 input2 output [options] && exit 1
+options=`echo $* | cut -d" " -f 5-`
+
+#### Gather device information
+$barracudaExec deviceQuery > devices.txt
+
+#### gather device information
+deviceCount=`wc -l devices.txt | awk '{print $1}'`
+
+#### find and count usable device count
+# usable device count
+execCount=0;
+i=1
+[ -f execList.txt ] && rm execList.txt
+while [ $i -le $deviceCount ]
+do
+  curDev=`head -$i devices.txt | tail -1`
+  devNum=`echo $curDev| awk '{print $1}'`
+  devRam=`echo $curDev| awk '{print $2}'`
+  devVer=`echo $curDev| awk '{print $3}'`
+  if [ $devRam -ge 512 -a $devVer -ge 12 ] 
+  then
+    echo Device Number $devNum with RAM=$devRam MB Version=$devVer will be used
+    #usable device numbers are recorded in execList.txt
+    echo $devNum >> execList.txt
+    execCount=$[$execCount+1]
+  fi
+  i=$[$i+1]
+done
+
+#### Not enough device to run multiple sampe
+[ $execCount -lt 2 ] && echo No enough devices multiple sampe to run && exit 1
+
+### create execRun.sh
+printf "#!/bin/bash\n" > execRun.sh
+printf "options=`echo \$* | cut -d\" \" -f 5-`\n" >> execRun.sh
+printf "echo Using device \$1, \$2 as input, \$3 as reference, with options \\\\\"\$options\\\\\"\n" >> execRun.sh
+printf "###SAI output name\n" >> execRun.sh
+printf "outNameSai='outSai_'\$2\n" >> execRun.sh
+printf "### Do alignment\n" >> execRun.sh
+printf "$barracudaExec aln -C\$1 $options \$3 \$2 > \$outNameSai\n" >> execRun.sh
+printf "echo 1 >> finished\n" >> execRun.sh
+chmod 755 execRun.sh
+
+### Submitting jobs to usable devices
+[ -f finished ] && rm -f finished 
+touch finished
+curDev=`head -1 execList.txt | tail -1`
+./execRun.sh $curDev $2 $1 $options &
+curDev=`head -2 execList.txt | tail -1`
+./execRun.sh $curDev $3 $1 $options &
+
+### Waiting for results
+echo Waiting. . .
+finishCount=0
+while [ $finishCount -lt 2 ]
+do
+  sleep 1
+  finishCount=`wc -l finished | awk '{print $1}'`
+done
+
+### Convert to Sam using sam pair end
+echo Convert to Sam
+$barracudaExec sampe $1 'outSai_'$2 'outSai_'$3 $2 $3 > $4
+clean
+echo finished
+
