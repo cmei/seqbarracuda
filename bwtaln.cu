@@ -38,47 +38,52 @@
 ///////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////
 
+
+// Performance switches
+#define CPU_LOOK_GOOD 1 //block CPU from polling when aligning sequences.  Free CPU for other tasks, but slow down GPU performance.
+#define BWT_2_OCC_ENABLE 0 // enable looking up of k and l in the same time for counting character occurrence (slower, so disable by default)
+#define BWT_TABLE_LOOKUP_ENABLE 1 // use lookup table when instead of counting character occurrence, (faster so enable by default)
+
+
+//The followings are settings for memory allocations and memory requirements
+#define MIN_MEM_REQUIREMENT 768 // minimal global memory requirement in (MB).  Currently at 768MB
+#define CUDA_TESLA 3072 // minimal memory requirement in (MB) for Tesla compute cards to use an enlarged buffer. Currently at 3072MB
+#define SEQUENCE_TABLE_SIZE_EXPONENTIAL 23 // buffer size in (2^)units for sequences and alignment storages (batch size)
+// Maximum exponential is up to 30 [~ 1  GBytes] for non-debug, non alignment
+// Maximum exponential is up to 26 [~ 128MBytes] for debug
+// Maximum exponential is up to 23 for alignment with 4GB RAM(default : 23)
+#define CUDA_WORKSPACE 1200 // Define device workspace for alignment in MiB
+// TODO: correlate workspace with buffer size
+
+
+//The followings are for DEBUG only
+//define whether to use DFS or BFS based search, default is DFS (where it is BFS in BWA)
 #define OUTPUT_ALIGNMENTS 1 // should leave ON for outputting alignment
 #define STDOUT_STRING_RESULT 0 // output alignment in text format (in SA coordinates, not compatible with SAM output modules(samse/pe)
 #define STDOUT_BINARY_RESULT 1//output alignment for samse/sampe (should leave ON)
 #define DO_RC 1 //enable looking for matches on the complementary strand
+#define DFS 1 //for cuda code (for DEBUG ONLY, should leave on)
+#define CPU_DFS 0 //for cpu code (for DEBUG ONLY, should leave off)
+#define MAX_NO_OF_GAP_ENTRIES 512 //define maximum stack entries for BFS cannot go beyond 512 (ptx error), not used for DFS
 
-//for function inexact match
+
+//Global variables for inexact match <<do not change>>
 #define STATE_M 0
 #define STATE_I 1
 #define STATE_D 2
 
-//define whether to use DFS or BFS based search, default is DFS (where it is BFS in BWA)
-#define DFS 1 //for cuda code (for DEBUG ONLY, should leave on)
-#define CPU_DFS 0 //for cpu code (for DEBUG ONLY, should leave off)
-
-
-//define maximum stack entries for BFS cannot go beyond 512 (ptx error), not used for DFS
-#define MAX_NO_OF_GAP_ENTRIES 512
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 
-// CUDA includes
-//#include <cutil.h>
-
-// enable looking up of k and l in the same time for counting character occurrence (slower, so disable by default)
-#define BWT_2_OCC_ENABLE 0
-// use lookup table when instead of counting character occurrence, (faster so enable by default)
-#define BWT_TABLE_LOOKUP_ENABLE 1
-
-// Maximum exponential is up to 30 [~ 1  GBytes] for non-debug, non alignment
-// Maximum exponential is up to 26 [~ 128MBytes] for debug
-// Maximum exponential is up to 23 for alignment with 4GB RAM(default : 23)
-#define SEQUENCE_TABLE_SIZE_EXPONENTIAL 23
-
-
-
+//CUDA global variables
 __device__ __constant__ bwt_t bwt_cuda;
 __device__ __constant__ bwt_t rbwt_cuda;
 __device__ __constant__ gap_opt_t options_cuda;
 
+
+//Texture Maps
 // uint4 is used because the maximum width for CUDA texture bind of 1D memory is 2^27,
 // and uint4 the structure 4xinteger is x,y,z,w coordinates and is 16 bytes long,
 // therefore effectively there are 2^27x16bytes memory can be access = 2GBytes memory.
@@ -87,13 +92,22 @@ texture<uint4, 1, cudaReadModeElementType> rbwt_occ_array;
 texture<unsigned int, 1, cudaReadModeElementType> sequences_array;
 texture<uint2, 1, cudaReadModeElementType> sequences_index_array;
 
-// The following line will copy the
+
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+
+unsigned long long copy_bwts_to_cuda_memory( const char * prefix, unsigned int ** bwt,  unsigned int ** rbwt, int mem_available)
 // bwt occurrence array to global and bind to texture, bwt structure to constant memory
-unsigned long long copy_bwts_to_cuda_memory( const char * prefix, unsigned int ** bwt,  unsigned int ** rbwt )
 {
 	bwt_t * bwt_src;
 	char str[100];
 	unsigned long long size_read = 0;
+	int workspace = CUDA_WORKSPACE;
+
+	if (mem_available < CUDA_TESLA)
+	{
+		workspace = workspace >> 1;
+	}
 
 	if ( bwt != 0 )
 	{
@@ -101,6 +115,13 @@ unsigned long long copy_bwts_to_cuda_memory( const char * prefix, unsigned int *
 		//Load bwt occurrence array from from disk
 		strcpy(str, prefix); strcat(str, ".bwt");  bwt_src = bwt_restore_bwt(str);
 		size_read += bwt_src->bwt_size*sizeof(uint32_t);
+		workspace = workspace + int (size_read>>20);
+
+		if (mem_available < workspace)
+		{
+			fprintf(stderr,"[aln_core] Not enough device memory to perform alignment.\n");
+			return 0;
+		}
 		//Allocate memory for bwt
 		cudaMalloc((void**)bwt, bwt_src->bwt_size*sizeof(uint32_t));
 		//copy bwt occurrence array from host to device and dump the bwt to save CPU memory
@@ -117,6 +138,14 @@ unsigned long long copy_bwts_to_cuda_memory( const char * prefix, unsigned int *
 		//Load bwt occurrence array from from disk
 		strcpy(str, prefix); strcat(str, ".rbwt");  bwt_src = bwt_restore_bwt(str);
 		size_read += bwt_src->bwt_size*sizeof(uint32_t);
+
+		workspace = workspace + int ((bwt_src->bwt_size*sizeof(uint32_t))>>20);
+
+		if (mem_available < workspace)
+		{
+			fprintf(stderr,"[aln_core] Not enough device memory to perform alignment.\n");
+			return 0;
+		}
 		//Allocate memory for bwt
 		cudaMalloc((void**)rbwt, bwt_src->bwt_size*sizeof(uint32_t));
 		//copy reverse bwt occurrence array from host to device and dump the bwt to save CPU memory
@@ -147,7 +176,7 @@ void free_bwts_from_cuda_memory( unsigned int * bwt , unsigned int * rbwt )
 #define write_to_half_byte_array(array,index,data) \
 	(array)[(index)>>1]=(unsigned char)(((index)&0x1)?(((array)[(index)>>1]&0xF0)|((data)&0x0F)):(((data)<<4)|((array)[(index)>>1]&0x0F)))
 
-int copy_sequences_to_cuda_memory ( bwa_seqio_t *bs, uint2 * global_sequences_index, uint2 * main_sequences_index, unsigned char * global_sequences, unsigned char * main_sequences, unsigned int * read_size, unsigned short & max_length, int mid)
+int copy_sequences_to_cuda_memory ( bwa_seqio_t *bs, uint2 * global_sequences_index, uint2 * main_sequences_index, unsigned char * global_sequences, unsigned char * main_sequences, unsigned int * read_size, unsigned short & max_length, int mid, int buffer)
 {
 	//sum of length of sequences up the the moment
 	unsigned int accumulated_length = 0;
@@ -164,7 +193,7 @@ int copy_sequences_to_cuda_memory ( bwa_seqio_t *bs, uint2 * global_sequences_in
 		accumulated_length += read_length;
 		number_of_sequences++;
 
-		if ( accumulated_length + MAX_SEQUENCE_LENGTH > (1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL+1)) ) break;
+		if ( accumulated_length + MAX_SEQUENCE_LENGTH > (1ul<<(buffer+1)) ) break;
 	}
 	//copy main_sequences_width from host to device
 	cudaUnbindTexture(sequences_index_array);
@@ -173,8 +202,8 @@ int copy_sequences_to_cuda_memory ( bwa_seqio_t *bs, uint2 * global_sequences_in
 
     //copy main_sequences from host to device, sequences array length should be accumulated_length/2
     cudaUnbindTexture(sequences_array);
-    cudaMemcpy(global_sequences, main_sequences, (1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL))*sizeof(unsigned char), cudaMemcpyHostToDevice);
-    cudaBindTexture(0, sequences_array, global_sequences, (1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL))*sizeof(unsigned char));
+    cudaMemcpy(global_sequences, main_sequences, (1ul<<(buffer))*sizeof(unsigned char), cudaMemcpyHostToDevice);
+    cudaBindTexture(0, sequences_array, global_sequences, (1ul<<(buffer))*sizeof(unsigned char));
 
     if ( read_size ) *read_size = accumulated_length;
 
@@ -1047,7 +1076,7 @@ __device__ int cuda_dfs_match(const int len, const unsigned char *str, const int
 //and recursively narrow down the k(upper) & l(lower) SA boundaries until it reaches the first char [i = 0], if k<=l then a match is found.
 {
 
-	//Initializations
+	//Initialisations
 	int best_diff = opt->max_diff + 1;
 	int max_diff = opt->max_diff;
 	int best_cnt = 0;
@@ -1061,7 +1090,7 @@ __device__ int cuda_dfs_match(const int len, const unsigned char *str, const int
 	int loop_count = 0;
 	const int max_count = options_cuda.max_entries;
 
-	//Initialize memory stores first in, last out
+	//Initialise memory stores first in, last out
 	cuda_dfs_initialize(entries_info, entries_scores, done_push_types/*, scores*/); //initialize initial entry, current stage set at 0 and done push type = 0
 
 	//push first entry, the first char of the query sequence into memory stores for evaluation
@@ -1797,7 +1826,7 @@ __global__ void cuda_directional_inexact_match_caller(int no_of_sequences, unsig
 		syncthreads();
 		bwt_cuda_device_calculate_width(local_sequence, sequence_type, local_sequence_widths, local_sequence_bids, sequence_length);
 
-		//Align with forward reference sequence
+		//Align to forward reference sequence
 		#if DFS == 0
 		cuda_inexact_match(sequence_length, local_sequence, sequence_type, local_sequence_widths, local_sequence_bids, &local_options, &local_alignment_store, worst_score);
 		#endif //DFS == 0
@@ -1812,8 +1841,9 @@ __global__ void cuda_directional_inexact_match_caller(int no_of_sequences, unsig
 	}
 	return;
 }
+
 //////////////////////////////////////////////////////////////////////////////////////////////
-//Line below is for BWA CPU code
+//Line below is for BWA CPU MODE
 
 
 #ifdef HAVE_PTHREAD
@@ -2027,6 +2057,11 @@ int bwa_cal_maxdiff(int l, double err, double thres)
 	return 2;
 }
 
+
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+
+
 void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *opt, unsigned char cuda_opt)
 //Main alignment module caller
 //Determines the availability of CUDA devices and
@@ -2112,33 +2147,53 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 
 		// Detect and choose the fastest CUDA device available on the machine
 		int num_devices, device;
+		long mem_available = 0;
 		cudaGetDeviceCount(&num_devices);
+		cudaDeviceProp properties;
 
 		if (opt->cuda_device == -1)
 		{
 			if (num_devices >= 1)
 			{
 			     fprintf(stderr, "[aln_core] Querying CUDA devices:\n");
-				 int max_multiprocessors = 0, max_device = 0;
+				 int max_cuda_cores = 0, max_device = 0;
 				 for (device = 0; device < num_devices; device++)
 				 {
-					  cudaDeviceProp properties;
 					  cudaGetDeviceProperties(&properties, device);
 					  fprintf(stderr, "[aln_core]   Device %d ", device);
 					  for (int i = 0; i < 256; i++)
 					  {
 						  fprintf(stderr,"%c", properties.name[i]);
 					  }
-					  fprintf(stderr,", multiprocessor count %d, CUDA compute capability %d.%d.\n", properties.multiProcessorCount, properties.major,  properties.minor);
-					  if (max_multiprocessors < properties.multiProcessorCount)
-					  {
-							  max_multiprocessors = properties.multiProcessorCount;
-							  max_device = device;
-					  }
 
+					  int cuda_cores = properties.multiProcessorCount<<((1<<properties.major)+1);
+					  //calculated by multiprocessors * 8 for 1.x and multiprocessors * 32 for 2.x
+
+					  fprintf(stderr,", CUDA cores %d, global mem %d MB, compute capability %d.%d.\n", int(cuda_cores), int(properties.totalGlobalMem>>20), int(properties.major),  int(properties.minor));
+					  if (max_cuda_cores <= cuda_cores) //choose the one with highest number of processors
+					  {
+							  max_cuda_cores = cuda_cores;
+							  if (mem_available < properties.totalGlobalMem) //choose the one with max memory
+							  {
+								      mem_available = properties.totalGlobalMem;
+									  max_device = device;
+							  }
+					  }
 	  		     }
-				 fprintf(stderr, "[aln_core] Using CUDA device %d.\n", max_device);
-				 cudaSetDevice(max_device);
+				 if (mem_available>>20 >= MIN_MEM_REQUIREMENT)
+				 {
+					 fprintf(stderr, "[aln_core] Using CUDA device %d, total global memory size %d MB.\n", max_device, int(mem_available>>20));
+					 cudaSetDevice(max_device);
+					#if CPU_LOOK_GOOD
+					 cudaSetDeviceFlags(cudaDeviceBlockingSync);
+					 //added to prevent CPU threads from polling while kernel is aligning, may slow down performance a bit, optional and can restore to default
+					#endif
+				 }
+				 else
+				 {
+					 fprintf(stderr,"[aln_core] Cannot find a suitable CUDA device with > %d MB of global memory! aborting!\n", MIN_MEM_REQUIREMENT);
+					 return;
+				 }
 			}
 			else
 			{
@@ -2149,18 +2204,35 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 		}
 		else if (opt->cuda_device >= 0)
 		{
-			 fprintf(stderr, "[aln_core] Using specified CUDA device %d.\n", opt->cuda_device);
-			 cudaSetDevice(opt->cuda_device);
+			 cudaGetDeviceProperties(&properties, opt->cuda_device);
+			 mem_available = properties.totalGlobalMem;
+			 fprintf(stderr, "[aln_core] Using specified CUDA device %d, total global memory size %d MB.\n", opt->cuda_device, int(mem_available>>20));
+		     cudaSetDevice(opt->cuda_device);
+			#if CPU_LOOK_GOOD
+		     cudaSetDeviceFlags(cudaDeviceBlockingSync);
+			 //added to prevent CPU threads from polling while kernel is aligning, may slow down performance a bit, optional and can restore to default
+			#endif
 		}
 
+		//Set memory buffer for different global memory sizes
+		int buffer = SEQUENCE_TABLE_SIZE_EXPONENTIAL;
+		if ((mem_available>>20) < CUDA_TESLA)
+		{
+			buffer = buffer - 2;
+		}
 
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		// Copy bwt occurrences array to from HDD to CPU then to GPU
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 		gettimeofday (&start, NULL);
-		bwt_read_size = copy_bwts_to_cuda_memory(prefix, &global_bwt, &global_rbwt)>>20;
+		bwt_read_size = copy_bwts_to_cuda_memory(prefix, &global_bwt, &global_rbwt, mem_available>>20)>>20;
 		// copy_bwt_to_cuda_memory
+		// returns 0 if error occurs
+		// mem_available in MiB not in bytes
+
+		if (!bwt_read_size) return; //break
+
 		gettimeofday (&end, NULL);
 		time_used = diff_in_seconds(&end,&start);
 		total_time_used += time_used;
@@ -2172,11 +2244,11 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 
 		gettimeofday (&start, NULL);
 		//allocate global_sequences memory in device
-		cudaMalloc((void**)&global_sequences, (1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL))*sizeof(unsigned char));
-		main_sequences = (unsigned char *)malloc((1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL))*sizeof(unsigned char));
+		cudaMalloc((void**)&global_sequences, (1ul<<(buffer))*sizeof(unsigned char));
+		main_sequences = (unsigned char *)malloc((1ul<<(buffer))*sizeof(unsigned char));
 		//allocate global_sequences_index memory in device assume the average length is bigger the 16bp (currently -3, -4 for 32bp, -3 for 16bp)long
-		cudaMalloc((void**)&global_sequences_index, (1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL-3))*sizeof(uint2));
-		main_sequences_index = (uint2*)malloc((1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL-3))*sizeof(uint2));
+		cudaMalloc((void**)&global_sequences_index, (1ul<<(buffer-3))*sizeof(uint2));
+		main_sequences_index = (uint2*)malloc((1ul<<(buffer-3))*sizeof(uint2));
 		//allocate and copy options (opt) to device constant memory
 		cudaMalloc((void**)&options, sizeof(gap_opt_t));
 		cudaMemcpy ( options, opt, sizeof(gap_opt_t), cudaMemcpyHostToDevice);
@@ -2184,13 +2256,14 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 		//allocate alignment stores for host and device
 		#if OUTPUT_ALIGNMENTS == 1
 		//allocate alignment store memory in device assume the average length is bigger the 16bp (currently -3, -4 for 32bp, -3 for 16bp)long
-		global_alignment_store_host = (alignment_store_t*)malloc((1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL-3))*sizeof(alignment_store_t));
-		cudaMalloc((void**)&global_alignment_store_device, (1ul<<(SEQUENCE_TABLE_SIZE_EXPONENTIAL-3))*sizeof(alignment_store_t));
+		global_alignment_store_host = (alignment_store_t*)malloc((1ul<<(buffer-3))*sizeof(alignment_store_t));
+		cudaMalloc((void**)&global_alignment_store_device, (1ul<<(buffer-3))*sizeof(alignment_store_t));
 		#endif // OUTPUT_ALIGNMENTS == 1
 		gettimeofday (&end, NULL);
 		time_used = diff_in_seconds(&end,&start);
 		total_time_used += time_used;
-		//fprintf(stderr, "Finished allocating CUDA device memory, it took %0.2fs.\n\n", time_used );
+//		fprintf(stderr, "Finished allocating CUDA device memory, it took %0.2fs.\n\n", time_used );
+
 
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		// Core loop (this loads sequences to host memory, transfers to cuda device and aligns via cuda in CUDA blocks)
@@ -2198,7 +2271,7 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 
 		gettimeofday (&start, NULL);
 		int loopcount = 0;
-		while ( ( no_of_sequences = copy_sequences_to_cuda_memory(ks, global_sequences_index, main_sequences_index, global_sequences, main_sequences, &read_size, max_sequence_length, opt->mid) ) > 0 )
+		while ( ( no_of_sequences = copy_sequences_to_cuda_memory(ks, global_sequences_index, main_sequences_index, global_sequences, main_sequences, &read_size, max_sequence_length, opt->mid, buffer) ) > 0 )
 		{
 
 #if DFS == 1
@@ -2332,8 +2405,8 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 			loopcount ++;
 		}
 		fprintf(stderr, "\n[aln_core] Finished!\n[aln_core] Total no. of sequences: %u, size in base pair: %u bp, average length %0.2f bp/sequence.\n", (unsigned int)total_no_of_sequences, (unsigned int)total_no_of_base_pair, (float)total_no_of_base_pair/(unsigned int)total_no_of_sequences);
-		fprintf(stderr, "[aln_core] Alignment Speed: %0.2f sequences/sec or %0.2f bp/sec.\n", (float)total_no_of_sequences/total_calculation_time_used, (float)total_no_of_base_pair/total_calculation_time_used);
-		fprintf(stderr, "[aln_core] Total compute time: %0.2fs, total program time: %0.2fs.\n", total_calculation_time_used, total_time_used);
+		fprintf(stderr, "[aln_core] Alignment Speed: %0.2f sequences/sec or %0.2f bp/sec.\n", (float)(total_no_of_sequences/total_time_used), (float)(total_no_of_base_pair/total_time_used));
+		fprintf(stderr, "[aln_core] Total program time: %0.2fs.\n", (float)total_time_used);
 
 		//Free memory
 		cudaFree(global_sequences);
@@ -2614,17 +2687,16 @@ void bwa_deviceQuery()
 
 	if (num_devices)
 		{
-			  fprintf(stderr,"[deviceQuery] Querying CUDA devices:\n");
+			  //fprintf(stderr,"[deviceQuery] Querying CUDA devices:\n");
 			  for (device = 0; device < num_devices; device++)
 			  {
 					  cudaDeviceProp properties;
 					  cudaGetDeviceProperties(&properties, device);
 					  fprintf(stdout, "%d ", device);
-					  fprintf(stdout, "%d %d%d\n", int(properties.totalGlobalMem/1048576), int(properties.major),  int(properties.minor));
+					  fprintf(stdout, "%d %d%d\n", int(properties.totalGlobalMem>>20), int(properties.major),  int(properties.minor));
 
 			  }
-			  fprintf(stderr,"[total] %d\n", device);
+			  //fprintf(stderr,"[total] %d\n", device);
 		}
-//cudaSetDevice(0);
 	return;
 }
