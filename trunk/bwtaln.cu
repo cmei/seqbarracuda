@@ -46,13 +46,13 @@
 
 
 //The followings are settings for memory allocations and memory requirements
-#define MIN_MEM_REQUIREMENT 768 // minimal global memory requirement in (MB).  Currently at 768MB
-#define CUDA_TESLA 3072 // minimal memory requirement in (MB) for Tesla compute cards to use an enlarged buffer. Currently at 3072MB
+#define MIN_MEM_REQUIREMENT 768 // minimal global memory requirement in (MiB).  Currently at 768MB
+#define CUDA_TESLA 3072 // minimal memory requirement in (MiB) for Tesla compute cards to use an enlarged buffer. Currently at 3072MB
 #define SEQUENCE_TABLE_SIZE_EXPONENTIAL 23 // buffer size in (2^)units for sequences and alignment storages (batch size)
 // Maximum exponential is up to 30 [~ 1  GBytes] for non-debug, non alignment
 // Maximum exponential is up to 26 [~ 128MBytes] for debug
 // Maximum exponential is up to 23 for alignment with 4GB RAM(default : 23)
-#define CUDA_WORKSPACE 1200 // Define device workspace for alignment in MiB
+#define CUDA_WORKSPACE 1200 // Define device workspace for alignment in (MiB)
 // TODO: correlate workspace with buffer size
 
 
