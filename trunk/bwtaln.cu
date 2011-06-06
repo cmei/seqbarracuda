@@ -40,7 +40,7 @@
 
 
 // Performance switches
-#define CPU_LOOK_GOOD 1 //block CPU from polling when aligning sequences.  Free CPU for other tasks, but slow down GPU performance.
+#define CPU_LOOK_GOOD 0 //block CPU from polling when aligning sequences.  Free CPU for other tasks, but slow down GPU performance.
 #define BWT_2_OCC_ENABLE 0 // enable looking up of k and l in the same time for counting character occurrence (slower, so disable by default)
 #define BWT_TABLE_LOOKUP_ENABLE 1 // use lookup table when instead of counting character occurrence, (faster so enable by default)
 
@@ -226,6 +226,7 @@ __device__ unsigned char read_char(unsigned int pos, unsigned int * lastpos, uns
 		*data = tmp = tex1Dfetch(sequences_array, pos_shifted);
 		*lastpos=pos_shifted;
 	}
+
 	switch (pos&0x7)
 	{
 	case 7:
@@ -253,6 +254,7 @@ __device__ unsigned char read_char(unsigned int pos, unsigned int * lastpos, uns
 		c = tmp>>4;
 		break;
 	}
+
 	return c&0xF;
 }
 
@@ -1350,14 +1352,18 @@ __device__ int cuda_dfs_match(const int len, const unsigned char *str, const int
 							}
 							else if (done_push_types[current_stage].z < no_of_eligible_cs)  //check if done before
 							{	//deletions
-								done_push_types[current_stage].z++;
 								unsigned int tmp = (options_cuda.mode & BWA_MODE_LOGGAP)? (int_log2_cuda(e_n_gape + e_n_gapo))>>1 + 1 : e_n_gapo + e_n_gape;
 								if (i >= options_cuda.indel_end_skip + tmp && len - i >= options_cuda.indel_end_skip + tmp)
 								{
 									int c = eligible_cs[current_stage][(done_push_types[current_stage].z)];
+									done_push_types[current_stage].z++;
 									cuda_dfs_push(entries_info, entries_scores, done_push_types, i + 1, ks[current_stage][c], ls[current_stage][c], e_n_mm, e_n_gapo + 1, e_n_gape, STATE_D, 1, current_stage+1);
 									current_stage++; //advance stage number by 1
 									continue;
+								}
+								else
+								{
+									done_push_types[current_stage].z++;
 								}
 							}
 						}
@@ -1386,7 +1392,6 @@ __device__ int cuda_dfs_match(const int len, const unsigned char *str, const int
 					occ = l - k + 1;
 					if (done_push_types[current_stage].z < no_of_eligible_cs)  //check if done before
 					{
-						done_push_types[current_stage].z++;
 						if (e_n_gape < opt->max_gape) //skip if no of gap ext is beyond limit
 						{
 							if (score + options_cuda.s_gape <=worst_tolerated_score) //skip if prospective entry is beyond worst tolerated
@@ -1398,6 +1403,7 @@ __device__ int cuda_dfs_match(const int len, const unsigned char *str, const int
 									if (i >= options_cuda.indel_end_skip + tmp && len - i >= options_cuda.indel_end_skip + tmp)
 									{
 										int c = eligible_cs[current_stage][(done_push_types[current_stage].z)];
+										done_push_types[current_stage].z++;
 										cuda_dfs_push(entries_info, entries_scores, done_push_types, i + 1, ks[current_stage][c], ls[current_stage][c], e_n_mm, e_n_gapo, e_n_gape + 1, STATE_D, 1, current_stage+1);
 										current_stage++; //advance stage number
 										continue;
@@ -1405,8 +1411,12 @@ __device__ int cuda_dfs_match(const int len, const unsigned char *str, const int
 								}
 							}
 						}
+						else
+						{
+							done_push_types[current_stage].z++;
+						}
 					}
-				} //end else if (e_state == STATE_D)
+				} //end else if (e_state == STATE_D)*/
 
 		}//end if (!allow_diff)
 		current_stage--;
