@@ -28,7 +28,7 @@
 #include "main.h"
 
 #ifndef PACKAGE_VERSION
-#define PACKAGE_VERSION "0.5.1 beta"
+#define PACKAGE_VERSION "0.6 beta"
 #endif
 
 static int usage()
