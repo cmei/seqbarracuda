@@ -20,8 +20,10 @@
 #define SAM_FSC 256 // secondary alignment
 
 #define BWA_AVG_ERR 0.02
-#define MAX_SEQUENCE_LENGTH 80 //cannot go beyond 225 (ptx error)
+#define MAX_SEQUENCE_LENGTH 150 //cannot go beyond 225 (ptx error)
 #define MAX_NO_OF_ALIGNMENTS 40
+#define MAX_SCORE 32 //How many different scores to store
+
 
 #ifndef bns_pac
 #define bns_pac(pac, k) ((pac)[(k)>>2] >> ((~(k)&3)<<1) & 3)
@@ -47,6 +49,8 @@ typedef struct {
 	unsigned char n_mm, n_gapo,n_gape, a;
 	bwtint_t k, l;
 	int score;
+	int best_diff;
+	int best_cnt;
 } bwt_aln1_t;
 
 typedef struct {
@@ -87,6 +91,7 @@ typedef struct {
 	int max_aln;
 	int mid;
 	int cuda_device;
+	int split_kernel; // TODO temporary setting
 } gap_opt_t;
 
 #define BWA_PET_STD   1
@@ -98,11 +103,53 @@ typedef struct {
 	int type, is_sw;
 } pe_opt_t;
 
+typedef struct {
+	unsigned int lim_k;
+	unsigned int lim_l;
+	unsigned char cur_n_mm, cur_n_gapo,cur_n_gape;
+	int cur_state;
+	int best_diff;
+	int best_cnt;
+	int sequence_type;
+} init_info_t;
+
+//host-device transit structure
 typedef struct
 {
 	bwt_aln1_t alignment_info[MAX_NO_OF_ALIGNMENTS];
 	int no_of_alignments;
+	int best_score; //marks best score achieved for particular sequence in the forward run - not updated for backward atm
+	unsigned int sequence_id;
+	char start_pos;
+	// also store current state of alignment
+	init_info_t init;
+	char finished;
 }alignment_store_t;
+
+
+struct align_store_lst_t
+{
+   bwt_aln1_t val;
+   int sequence_id;
+   int start_pos;
+   char finished;
+   struct align_store_lst_t * next;
+};
+
+typedef struct align_store_lst_t align_store_lst;
+
+//Temporary host structure to hold alignments
+typedef struct
+{
+
+	align_store_lst * score_align[MAX_SCORE]; // holds a pointer for each of the scores
+	int start_pos; // shared for all sequences - we do sequential runs
+	// also store current state of alignment
+}main_alignment_store_host_t;
+
+
+
+
 
 typedef struct
 {
@@ -130,11 +177,62 @@ extern "C" {
 	int bwa_aln(int argc, char *argv[]);
 	void bwa_deviceQuery();
 	int bwa_cal_maxdiff(int l, double err, double thres);
-
 	void bwa_cs2nt_core(bwa_seq_t *p, bwtint_t l_pac, ubyte_t *pac);
+	int detect_cuda_device();
+
+	///////////////////////////////////////////////////////////////
+	// Begin SAMSE CUDA core
+	///////////////////////////////////////////////////////////////
+
+    void launch_bwa_cal_pac_pos_cuda(
+	    const char *prefix,
+	    int n_seqs,
+	    bwa_seq_t *seqs,
+	    int max_mm,
+	    float fnr,
+	    int device);
+
+    int prepare_bwa_cal_pac_pos_cuda(
+        const char *prefix,
+        const int *g_log_n_ho,
+        const int g_log_n_len,
+        const int n_seqs_max,
+        int device);
+
+    void free_bwa_cal_pac_pos_cuda();
+
+    ///////////////////////////////////////////////////////////////
+    // End SAMSE CUDA core
+    ///////////////////////////////////////////////////////////////
 
 #ifdef __cplusplus
 }
 #endif
 
+
+///////////////////////////////////////////////////////////////
+// Begin SAMSE CUDA core
+///////////////////////////////////////////////////////////////
+
+void report_cuda_error_CPU(const char * message);
+void report_cuda_error_GPU(const char * message);
+void copy_g_log_n_cuda(const int *g_log_n_ho,const int g_log_n_len);
+//void copy_bwt_rbwt_sa_cuda(const bwt_t *bwt, const bwt_t *rbwt);
+void prepare_bwa_cal_pac_pos_seqs_cuda(int n_seqs_max);
+void free_bwa_cal_pac_pos_bwt_rbwt_cuda();
+void free_bwa_cal_pac_pos_seqs_cuda();
+void compare_mapQ_pos(bwa_seq_t *seqs, int n_seqs);
+void calc_n_block3(
+    int *n_sp_to_use,
+    int *n_block,
+    int *n_seq_per_block,
+    int *block_mod,
+    const int n_mp_on_device,
+    const int n_sp_per_mp,
+    const int n_seqs);
+
+
+///////////////////////////////////////////////////////////////
+// End SAMSE CUDA core
+///////////////////////////////////////////////////////////////
 #endif

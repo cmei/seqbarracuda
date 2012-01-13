@@ -3,7 +3,8 @@
 
    Module: bwase.c  Read sequence reads from file, modified from BWA to support barracuda alignment functions
 
-   Copyright (C) 2010, Brian Lam and Simon Lam
+   Copyright (C) 2010, University of Cambridge Metabolic Research Labs.
+   Contributers: Dag Lyberg, Simon Lam and Brian Lam
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -22,8 +23,7 @@
    This program is based on a modified version of BWA 0.4.9
 
 */
-
-
+#define PACKAGE_VERSION "0.6.1 beta"
 
 #include <unistd.h>
 #include <string.h>
@@ -37,7 +37,12 @@
 #include "utils.h"
 #include "kstring.h"
 
+// the read batch size, currently set at 262144
+#define BATCH_SIZE 0X40000
+
 static int g_log_n[256];
+
+
 
 void swap(bwt_aln1_t *x, bwt_aln1_t *y)
 {
@@ -162,6 +167,8 @@ void bwa_cal_pac_pos(const char *prefix, int n_seqs, bwa_seq_t *seqs, int max_mm
 	//char str[1024];
 	//bwt_t * bwt;
 
+	//int nfwd = 0, nrev = 0;
+
 	// load forward SA
 	//strcpy(str, prefix); strcat(str, ".bwt");  bwt = bwt_restore_bwt(str);
 	//strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt);
@@ -171,6 +178,7 @@ void bwa_cal_pac_pos(const char *prefix, int n_seqs, bwa_seq_t *seqs, int max_mm
 		if ((p->type == BWA_TYPE_UNIQUE || p->type == BWA_TYPE_REPEAT) && p->strand) { // reverse strand only
 			p->pos = bwt_sa(bwt, p->sa);
 			p->seQ = p->mapQ = bwa_approx_mapQ(p, max_diff);
+			//nfwd ++;
 		}
 	}
 	//bwt_destroy(bwt);
@@ -187,8 +195,10 @@ void bwa_cal_pac_pos(const char *prefix, int n_seqs, bwa_seq_t *seqs, int max_mm
 			 *     refine_gapped_core() when (ext < 0 && is_end == 0). */
 			p->pos = bwt->seq_len - (bwt_sa(rbwt, p->sa) + p->len);
 			p->seQ = p->mapQ = bwa_approx_mapQ(p, max_diff);
+			//nrev ++;
 		}
 	}
+	//fprintf(stderr,"fwdcount: %d, revcount %d\n", nfwd, nrev);
 	//bwt_destroy(bwt);
 }
 
@@ -478,11 +488,14 @@ void bwa_print_sam_SQ(const bntseq_t *bns)
 		printf("@SQ\tSN:%s\tLN:%d\n", bns->anns[i].name, bns->anns[i].len);
 }
 
-void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_fa)
+
+
+void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_fa, const int useCPU, int device)
 //This is modified to load both the bwt & rbwt into memory here rather than in bwa_cal_pac_pos
 //Adv is this reduces disk I/O (much faster)
 //TODO: will be ported to CUDA in next version
 {
+
 
 	int i, n_seqs, tot_seqs = 0, m_aln;
 	bwt_aln1_t *aln = 0;
@@ -506,20 +519,24 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 	char str[1024];
 	bwt_t *bwt, *rbwt;
 
-	// open bwts added by brian
-	fprintf(stderr,"[samse_core] Loading BWTs, please wait..");
-	// load forward & reverse SA
-	gettimeofday (&start, NULL);
+	if(useCPU)
+	{	// open bwts added by brian
+		fprintf(stderr,"[samse_core] Loading BWTs, please wait..");
+		// load forward & reverse SA
+		gettimeofday (&start, NULL);
 
-	strcpy(str, prefix); strcat(str, ".bwt");  bwt = bwt_restore_bwt(str);
-	strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt);
-	strcpy(str, prefix); strcat(str, ".rbwt"); rbwt = bwt_restore_bwt(str);
-	strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, rbwt);
+		strcpy(str, prefix); strcat(str, ".bwt");  bwt = bwt_restore_bwt(str);
+		strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt);
+		strcpy(str, prefix); strcat(str, ".rbwt"); rbwt = bwt_restore_bwt(str);
+		strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, rbwt);
 
-	gettimeofday (&end, NULL);
-	time_used = diff_in_seconds(&end,&start);
+		gettimeofday (&end, NULL);
+		time_used = diff_in_seconds(&end,&start);
 
-	fprintf(stderr, "Done! \n[samse_core] Time used: %0.2fs\n", time_used);
+		fprintf(stderr, "Done! \n[samse_core] Time used: %0.2fs\n", time_used);
+
+	}
+
 
 	// core loop
 	m_aln = 0;
@@ -528,12 +545,45 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 		ntbns = bwa_open_nt(prefix);
 	if (opt.mid > 0) fprintf(stderr,"[samse_core] Option (-s %d) used for alignment, dropping the first %d bases from 5' ends.\n", opt.mid, opt.mid);
 
-	fprintf(stderr,"[samse_core] Refining alignments onto reference assembly, please wait..\n[samse_core] ");
-	gettimeofday (&start, NULL);
-
 	bwa_print_sam_SQ(bns); //print header - new from bwa 0.5.7
 
-	while ((seqs = bwa_read_seq(ks, 0x40000, &n_seqs, (opt.mode & BWA_MODE_COMPREAD), opt.mid)) != 0) {
+	int selectedDevice = -1;
+
+	//If GPU is selected,
+	if(!useCPU)
+	{
+		fprintf(stderr,"[samse_core] Running CUDA mode.\n");
+
+		///////////////////////////////////////////////////////////
+	    // Prepare cuda_bwa_cal_pac_pos()
+	    ///////////////////////////////////////////////////////////
+
+	    //int *g_log_n_de;
+	    const int g_log_n_len = 256;
+	    const int n_seqs_max = BATCH_SIZE;
+
+	    selectedDevice = prepare_bwa_cal_pac_pos_cuda(
+	        prefix,
+	        &g_log_n,
+	        g_log_n_len,
+	        n_seqs_max,
+	        device);
+
+	    if(selectedDevice < 0)
+	    {
+	    	return;
+	    }
+
+		fprintf(stderr,"[samse_core] Refining alignments onto reference assembly, please wait..\n[samse_core] ");
+
+	}else{
+		fprintf(stderr,"[samse_core] Running CPU mode.\n");
+		fprintf(stderr,"[samse_core] Refining alignments onto reference assembly, please wait..\n[samse_core] ");
+	}
+
+	gettimeofday (&start, NULL);
+
+	while ((seqs = bwa_read_seq(ks, BATCH_SIZE, &n_seqs, (opt.mode & BWA_MODE_COMPREAD), opt.mid)) != 0) {
 		tot_seqs += n_seqs;
 		//t = clock();
 
@@ -550,9 +600,31 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 			bwa_aln2seq(n_aln, aln, p);
 		}
 
-		//fprintf(stderr, "[bwa_samse_core] convert to sequence coordinate... ");
-		bwa_cal_pac_pos(prefix, n_seqs, seqs, opt.max_diff, opt.fnr, bwt, rbwt); // forward bwt will be destroyed here
-		fprintf(stderr,".");
+		if(useCPU)
+		{
+			//fprintf(stderr, "[bwa_samse_core] convert to sequence coordinate... ");
+			bwa_cal_pac_pos(prefix, n_seqs, seqs, opt.max_diff, opt.fnr, bwt, rbwt); // forward bwt will be destroyed here
+			fprintf(stderr,"c");
+		}
+		else
+		{
+			///////////////////////////////////////////////////////////////
+			// Begin bwa_cal_pac_pos_cuda
+			///////////////////////////////////////////////////////////////
+
+			launch_bwa_cal_pac_pos_cuda(
+			    prefix,
+			    n_seqs,
+			    seqs,
+			    opt.max_diff,
+			    opt.fnr,
+			    selectedDevice);
+
+			fprintf(stderr,".");
+			///////////////////////////////////////////////////////////////
+			// End bwa_cal_pac_pos_cuda
+			///////////////////////////////////////////////////////////////
+		}
 
 		//fprintf(stderr, "[bwa_samse_core] refine gapped alignments... ");
 		bwa_refine_gapped(bns, n_seqs, seqs, 0, ntbns);
@@ -566,7 +638,10 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 
 		bwa_free_read_seq(n_seqs, seqs);
 	}
-
+	if(!useCPU)
+	{
+		free_bwa_cal_pac_pos_cuda();
+	}
 	gettimeofday (&end, NULL);
 	time_used = diff_in_seconds(&end,&start);
 
@@ -576,8 +651,12 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 	bwa_seq_close(ks);
 	if (ntbns) bns_destroy(ntbns);
 	bns_destroy(bns);
-	bwt_destroy(bwt);
-	bwt_destroy(rbwt);
+
+	if(useCPU)
+	{
+		bwt_destroy(bwt);
+		bwt_destroy(rbwt);
+	}
 	fclose(fp_sa);
 	free(aln);
 }
@@ -623,7 +702,7 @@ void bwa_print_all_hits(const char *prefix, const char *fn_sa, const char *fn_fa
 
 	m_aln = 0;
 	fread(&opt, sizeof(gap_opt_t), 1, fp_sa);
-	while ((seqs = bwa_read_seq(ks, 0x80000, &n_seqs, opt.mode & BWA_MODE_COMPREAD, opt.mid)) != 0) {
+	while ((seqs = bwa_read_seq(ks, 0x40000, &n_seqs, opt.mode & BWA_MODE_COMPREAD, opt.mid)) != 0) {
 		tot_seqs += n_seqs;
 		for (i = 0; i < n_seqs; ++i) {
 			bwa_seq_t *p = seqs + i;
@@ -673,12 +752,15 @@ void bwa_print_all_hits(const char *prefix, const char *fn_sa, const char *fn_fa
 int bwa_sai2sam_se(int argc, char *argv[])
 {
 
-	fprintf(stderr, "Barracuda, Version 0.5.1 beta\n");
+	fprintf(stderr, "Barracuda, Version %s\n", PACKAGE_VERSION);
 
+	int useCPU = 0, selectedDevice = -1;
 	int c, n_occ = 0;
-	while ((c = getopt(argc, argv, "hn:")) >= 0) {
+	while ((c = getopt(argc, argv, "htC:n:")) >= 0) {
 		switch (c) {
 		case 'h': break;
+		case 't': useCPU = 1; break;
+		case 'C': selectedDevice = atoi(optarg); break;
 		case 'n': n_occ = atoi(optarg); break;
 		default: return 1;
 		}
@@ -690,6 +772,8 @@ int bwa_sai2sam_se(int argc, char *argv[])
 		fprintf(stderr, "Usage:\n          barracuda samse [options] <reference.fa> <reads.sai> <reads.fastq>\n");
 		fprintf(stderr, "\n");
 		fprintf(stderr, "Options: \n");
+		fprintf(stderr, "         -t 	   Run in CPU mode.\n");
+		fprintf(stderr, "         -C NUM   Specify which CUDA device to use. [default: auto-detect] \n");
 		fprintf(stderr, "         -n NUM   Maximum number of alignments to [non-SAM] output in the XA tag for single-end reads \n");
 		fprintf(stderr, "                  If a read has more than INT hits, the XA tag will not be included.\n");
 		fprintf(stderr, "                  [default: %d]\n\n", 3);
@@ -697,6 +781,10 @@ int bwa_sai2sam_se(int argc, char *argv[])
 		return 1;
 	}
 	if (n_occ > 0) bwa_print_all_hits(argv[optind], argv[optind+1], argv[optind+2], n_occ);
-	else bwa_sai2sam_se_core(argv[optind], argv[optind+1], argv[optind+2]);
+	else
+	{
+		//fprintf(stderr,"selected device %d\n", selectedDevice);
+		bwa_sai2sam_se_core(argv[optind], argv[optind+1], argv[optind+2], useCPU, selectedDevice);
+	}
 	return 0;
 }

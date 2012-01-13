@@ -655,7 +655,7 @@ int bwa_sai2sam_pe(int argc, char *argv[])
 	pe_opt_t *popt;
 	popt = bwa_init_pe_opt();
 
-	fprintf(stderr, "Barracuda, Version 0.5.1 beta\n");
+	fprintf(stderr, "Barracuda, Version 0.6 beta\n");
 
 	while ((c = getopt(argc, argv, "a:o:s")) >= 0) {
 		switch (c) {
