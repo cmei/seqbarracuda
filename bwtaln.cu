@@ -3,7 +3,7 @@
 
    Module: bwtaln.cu  Read sequence reads from file, modified from BWA to support barracuda alignment functions
 
-   Copyright (C) 2011, University of Cambridge Metabolic Research Labs.
+   Copyright (C) 2012, University of Cambridge Metabolic Research Labs.
    Contributers: Petr Klus, Dag Lyberg, Simon Lam and Brian Lam
 
    This program is free software; you can redistribute it and/or
@@ -58,7 +58,6 @@
 #define OUTPUT_ALIGNMENTS 1 // should leave ON for outputting alignment
 #define STDOUT_STRING_RESULT 0 // output alignment in text format (in SA coordinates, not compatible with SAM output modules(samse/pe)
 #define STDOUT_BINARY_RESULT 1 //output alignment for samse/sampe (leave ON)
-#define MYBINARY 0 // for debugging purposes, outputs the alignments to a separate file called mybinary.sai
 #define CUDA_SAMSE 1 //Enable CUDA SAMSE code, debug only (leave ON)
 
 // how much debugging information shall the kernel output? kernel output only works for fermi and above
@@ -82,7 +81,7 @@
 //CUDA global variables
 __device__ __constant__ bwt_t bwt_cuda;
 __device__ __constant__ bwt_t rbwt_cuda;
-__device__ __constant__ gap_opt_t options_cuda;
+__device__ __constant__ barracuda_gap_opt_t options_cuda;
 
 //Texture Maps
 // uint4 is used because the maximum width for CUDA texture bind of 1D memory is 2^27,
@@ -192,6 +191,49 @@ void free_bwts_from_cuda_memory( unsigned int * bwt , unsigned int * rbwt )
 	}
 }
 
+void swap2(bwt_aln1_t *x, bwt_aln1_t *y)
+{
+   bwt_aln1_t temp;
+   temp = *x;
+   *x = *y;
+   *y = temp;
+}
+
+int choose_pivot2(int i,int j)
+{
+   return((i+j) /2);
+}
+
+void aln_quicksort2(bwt_aln1_t *aln, int m, int n)
+//This function sorts the alignment array from barracuda to make it compatible with SAMSE/SAMPE cores
+{
+	int key,i,j,k;
+
+	if (m < n)
+	{
+	      k = choose_pivot2(m, n);
+	      swap2(&aln[m],&aln[k]);
+	      key = aln[m].score;
+	      i = m+1;
+	      j = n;
+	      while(i <= j)
+	      {
+	         while((i <= n) && (aln[i].score <= key))
+	                i++;
+	         while((j >= m) && (aln[j].score > key))
+	                j--;
+	         if(i < j)
+	                swap2(&aln[i],&aln[j]);
+	      }
+	      // swap two elements
+	      swap2(&aln[m],&aln[j]);
+	      // recursively sort the lesser lists
+	      aln_quicksort2(aln, m, j-1);
+	      aln_quicksort2(aln, j+1, n);
+	 }
+}
+
+
 #define write_to_half_byte_array(array,index,data) \
 	(array)[(index)>>1]=(unsigned char)(((index)&0x1)?(((array)[(index)>>1]&0xF0)|((data)&0x0F)):(((data)<<4)|((array)[(index)>>1]&0x0F)))
 
@@ -212,7 +254,7 @@ int copy_sequences_to_cuda_memory ( bwa_seqio_t *bs, uint2 * global_sequences_in
 		accumulated_length += read_length;
 		number_of_sequences++;
 
-		if ( accumulated_length + MAX_SEQUENCE_LENGTH > (1ul<<(buffer+1)) ) break;
+		if ( accumulated_length + MAX_READ_LENGTH > (1ul<<(buffer+1)) ) break;
 	}
 	//copy main_sequences_width from host to device
 	cudaUnbindTexture(sequences_index_array);
@@ -315,8 +357,6 @@ __device__ uint4 bwt_cuda_occ4(bwtint_t k)
 	if (k == (bwtint_t)(-1)) return n;
 	if (k >= bwt_cuda.primary) --k; // because $ is not in bwt
 
-	//tmp3 = k>>7;
-	//i = tmp3*3;
 	i = ((k>>7)*3);
 
 	// count the number of character c within the 128bits interval
@@ -1019,7 +1059,7 @@ __device__ void cuda_dfs_push(uint4 *stack, uchar4 *stack_mm, char4 *pushes, int
 	return;
 }
 
-__device__ int cuda_split_dfs_match(const int len, const unsigned char *str, const int sequence_type, unsigned int *widths, unsigned char *bids, const gap_opt_t *opt, alignment_store_t *aln, int best_score, const int max_aln)
+__device__ int cuda_split_dfs_match(const int len, const unsigned char *str, const int sequence_type, unsigned int *widths, unsigned char *bids, const barracuda_gap_opt_t *opt, alignment_store_t *aln, int best_score, const int max_aln)
 //This function tries to find the alignment of the sequence and returns SA coordinates, no. of mismatches, gap openings and extensions
 //It uses a depth-first search approach rather than breath-first as the memory available in CUDA is far less than in CPU mode
 //The search rooted from the last char [len] of the sequence to the first with the whole bwt as a ref from start
@@ -1251,8 +1291,8 @@ __device__ int cuda_split_dfs_match(const int len, const unsigned char *str, con
 							aln->alignment_info[j].n_gapo = e_n_gapo;
 							aln->alignment_info[j].n_gape = e_n_gape;
 							aln->alignment_info[j].score = score;
-							aln->alignment_info[j].best_cnt = best_cnt;
-							aln->alignment_info[j].best_diff = best_diff;
+					//		aln->alignment_info[j].best_cnt = best_cnt;
+						//	aln->alignment_info[j].best_diff = best_diff;
 
 						}
 					//do_add = 0;
@@ -1277,8 +1317,8 @@ printf("alignment already present, amending score\n");
 					aln->alignment_info[n_aln].k = k;
 					aln->alignment_info[n_aln].l = l;
 					aln->alignment_info[n_aln].score = score;
-					aln->alignment_info[n_aln].best_cnt = best_cnt;
-					aln->alignment_info[n_aln].best_diff = best_diff;
+				//	aln->alignment_info[n_aln].best_cnt = best_cnt;
+				//	aln->alignment_info[n_aln].best_diff = best_diff;
 #if DEBUG_LEVEL > 8
 					printf("alignment added: k:%u, l: %u, i: %i, score: %d, cur.stage: %d, m:%d\n", k, l, i, score, current_stage, m);
 #endif
@@ -1535,7 +1575,7 @@ printf("alignment already present, amending score\n");
 }
 
 
-__device__ int cuda_dfs_match(const int len, const unsigned char *str, const int sequence_type, unsigned int *widths, unsigned char *bids, const gap_opt_t *opt, alignment_store_t *aln, int best_score, const int max_aln)
+__device__ int cuda_dfs_match(const int len, const unsigned char *str, const int sequence_type, unsigned int *widths, unsigned char *bids, const barracuda_gap_opt_t *opt, alignment_store_t *aln, int best_score, const int max_aln)
 //This function tries to find the alignment of the sequence and returns SA coordinates, no. of mismatches, gap openings and extensions
 //It uses a depth-first search approach rather than breath-first as the memory available in CUDA is far less than in CPU mode
 //The search rooted from the last char [len] of the sequence to the first with the whole bwt as a ref from start
@@ -1993,7 +2033,7 @@ __global__ void cuda_inexact_match_caller(int no_of_sequences, unsigned short ma
 
 	int max_aln = options_cuda.max_aln;
 	//initialize local options for each query sequence
-	gap_opt_t local_options = options_cuda;
+	barracuda_gap_opt_t local_options = options_cuda;
 
 	//Core function
 	// work on valid sequence only
@@ -2108,7 +2148,7 @@ __global__ void cuda_split_inexact_match_caller(int no_of_sequences, unsigned sh
 
 	int max_aln = options_cuda.max_aln;
 	//initialize local options for each query sequence
-	gap_opt_t local_options = options_cuda;
+	barracuda_gap_opt_t local_options = options_cuda;
 
 	const int pass_length = (options_cuda.seed_len > PASS_LENGTH)? options_cuda.seed_len : PASS_LENGTH;
 	const int split_engage = pass_length + 6;
@@ -2345,13 +2385,13 @@ static int bwt_cal_width(const bwt_t *rbwt, int len, const ubyte_t *str, bwt_wid
 	return bid;
 }
 
-static void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt[2], int no_of_sequences, bwa_seq_t *seqs, const gap_opt_t *opt)
+static void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt[2], int no_of_sequences, bwa_seq_t *seqs, const barracuda_gap_opt_t *opt)
 {
 	int i, max_l = 0, max_len;
 	gap_stack_t *stack;
 	bwt_width_t *w[2], *seed_w[2];
 	const ubyte_t *seq[2];
-	gap_opt_t local_opt = *opt;
+	barracuda_gap_opt_t local_opt = *opt;
 
 	// initiate priority stack
 	for (i = max_len = 0; i != no_of_sequences; ++i)
@@ -2398,7 +2438,7 @@ static void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt[2], int no_of_sequences
 			bwt_cal_width(bwt[1], opt->seed_len, seq[1] + (p->len - opt->seed_len), seed_w[1]);
 		}
 
-		printf("seed length: %d", opt->seed_len);
+		//printf("seed length: %d", opt->seed_len);
 
 		#if DEBUG_LEVEL > 6
 			for (int x = 0; x<p->len; x++) {
@@ -2450,7 +2490,7 @@ typedef struct {
 	bwt_t *bwt[2];
 	int n_seqs;
 	bwa_seq_t *seqs;
-	const gap_opt_t *opt;
+	const barracuda_gap_opt_t *opt;
 } thread_aux_t;
 
 static void *worker(void *data)
@@ -2472,10 +2512,11 @@ double diff_in_seconds(struct timeval *finishtime, struct timeval * starttime)
 }
 
 // Setting default options
-gap_opt_t *gap_init_opt()
+barracuda_gap_opt_t *gap_init_opt()
 {
-	gap_opt_t *o;
-	o = (gap_opt_t*)calloc(1, sizeof(gap_opt_t));
+	//TODO: debug this
+	barracuda_gap_opt_t *o;
+	o = (barracuda_gap_opt_t*)calloc(1, sizeof(barracuda_gap_opt_t));
 	/* IMPORTANT: s_mm*10 should be about the average base error
 	   rate. Violating this requirement will break pairing! */
 	o->s_mm = 3; o->s_gapo = 11; o->s_gape = 4;
@@ -2493,6 +2534,30 @@ gap_opt_t *gap_init_opt()
 	o->max_top2 = 5; // change from 20 in bwa;
 	o->mid = 0; //default is no MID tag, i.e 0
 	o->cuda_device = -1;
+	o->bwa_output = 0;
+	return o;
+}
+
+gap_opt_t *gap_init_bwaopt(barracuda_gap_opt_t * opt)
+{
+	gap_opt_t *o;
+	o = (gap_opt_t*)calloc(1, sizeof(gap_opt_t));
+	o->s_mm = opt->s_mm;
+	o->s_gapo = opt->s_gapo;
+	o->s_gape = opt->s_gape;
+	o->max_diff = opt->max_diff;
+	o->max_gapo = opt->max_gapo;
+	o->max_gape = opt->max_gape;
+	o->indel_end_skip = opt->indel_end_skip;
+	o->max_del_occ = opt->max_del_occ;
+	o->max_entries = opt->max_entries;
+	o->mode = opt->mode;
+	o->seed_len = opt->seed_len;
+	o->max_seed_diff = opt->max_seed_diff;
+	o->fnr = opt->fnr;
+	o->n_threads = 0;
+	o->max_top2 = opt->max_top2;
+	o->trim_qual = 0;
 	return o;
 }
 
@@ -2513,7 +2578,7 @@ int bwa_cal_maxdiff(int l, double err, double thres)
 ///////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////
 
-void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *opt, unsigned char cuda_opt)
+void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, barracuda_gap_opt_t *opt, unsigned char cuda_opt)
 //Main alignment module caller
 //Determines the availability of CUDA devices and
 //invokes CUDA kernels cuda_inexact_match_caller
@@ -2521,16 +2586,6 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 
 {
 	bwa_seqio_t *ks;
-
-	#if STDOUT_BINARY_RESULT == 1
-	fwrite(opt, sizeof(gap_opt_t), 1, stdout);
-	#endif
-
-	#if MYBINARY == 1
-	FILE *mybinary;
-	mybinary = fopen ("mybinary.sai","w");
-	fwrite(opt, sizeof(gap_opt_t), 1, mybinary);
-	#endif
 
 	// total number of sequences read
 	unsigned int no_of_sequences = 0;
@@ -2550,6 +2605,20 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 	// initialization
 	ks = bwa_seq_open(fn_fa);
 
+#if STDOUT_BINARY_RESULT == 1
+
+	//output bwa compatible .sai if specified in '-b' option
+	if(!opt->bwa_output)
+	{
+		fwrite(opt, sizeof(barracuda_gap_opt_t), 1, stdout);
+	}else
+	{
+		fprintf(stderr,"[aln_core] Outputing in bwa v0.5.x-compatible file format\n");
+		gap_opt_t * bwaopt = gap_init_bwaopt(opt);
+		fwrite(bwaopt, sizeof(gap_opt_t), 1, stdout);
+	}
+
+#endif
 
 	if(opt->n_threads == -1) // CUDA MODE
 	{
@@ -2576,7 +2645,7 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 		// sequences index reside in main memory of CPU
 		uint2 * main_sequences_index = 0;
 		// Options from user
-		gap_opt_t *options;
+		barracuda_gap_opt_t *options;
 		// global alignment stores for device
 		alignment_store_t * global_alignment_store_device;
 		#if OUTPUT_ALIGNMENTS == 1
@@ -2594,17 +2663,22 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		//CUDA options
-//		if (!cuda_opt) fprintf(stderr,"[aln_core] Aligning both forward and reverse complementary sequences.\n");
 		if (opt->mid) fprintf(stderr,"[aln_core] Not aligning the first %d bases from the 5' end of sequencing reads.\n",opt->mid);
-//		if (cuda_opt == 1) fprintf(stderr,"[aln_core] CUDA Options: (f) Align forward sequences only.\n");
-//		if (cuda_opt == 2) fprintf(stderr,"[aln_core] CUDA Options: (r) Align reverse complementary sequences only.\n");
-
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		// Determine Cuda device
 		///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 		size_t mem_available = 0, total_mem = 0; //, max_mem_available = 0;
 		cudaDeviceProp properties;
+		int num_devices;
+		cudaGetDeviceCount(&num_devices);
+
+		if (!num_devices)
+		{
+			fprintf(stderr,"[aln_core] Cannot find a suitable CUDA device! aborting!\n");
+		}
+
+
 		int sel_device = 0;
 		if (opt->cuda_device == -1)
 		{
@@ -2638,6 +2712,8 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 		bwtint_t forward_seq_len;
 		bwtint_t backward_seq_len;
 		cudaMemGetInfo(&mem_available, &total_mem);
+		fprintf(stderr,"[aln_core] Loading BWTs, please wait..\n");
+
 		bwt_read_size = copy_bwts_to_cuda_memory(prefix, &global_bwt, &global_rbwt, mem_available>>20, &forward_seq_len, &backward_seq_len)>>20;
 
 		// copy_bwt_to_cuda_memory
@@ -2690,9 +2766,9 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 		cudaMalloc((void**)&global_sequences_index, (1ul<<(buffer-3))*sizeof(uint2));
 		main_sequences_index = (uint2*)malloc((1ul<<(buffer-3))*sizeof(uint2));
 		//allocate and copy options (opt) to device constant memory
-		cudaMalloc((void**)&options, sizeof(gap_opt_t));
-		cudaMemcpy ( options, opt, sizeof(gap_opt_t), cudaMemcpyHostToDevice);
-		cudaMemcpyToSymbol ( options_cuda, opt, sizeof(gap_opt_t), 0, cudaMemcpyHostToDevice);
+		cudaMalloc((void**)&options, sizeof(barracuda_gap_opt_t));
+		cudaMemcpy ( options, opt, sizeof(barracuda_gap_opt_t), cudaMemcpyHostToDevice);
+		cudaMemcpyToSymbol ( options_cuda, opt, sizeof(barracuda_gap_opt_t), 0, cudaMemcpyHostToDevice);
 		//allocate alignment stores for host and device
 		#if OUTPUT_ALIGNMENTS == 1
 		//allocate alignment store memory in device assume the average length is bigger the 16bp (currently -3, -4 for 32bp, -3 for 16bp)long
@@ -2763,9 +2839,11 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 					fprintf(stderr, "[aln_debug] Using split kernel\n");
 				else
 					fprintf(stderr, "[aln_debug] Using normal kernel\n");
+					fprintf(stderr,"[aln_core] Using SIMT with grid size: %u, block size: %d.\n[aln_core] ", gridsize,blocksize) ;
 #endif
 
-				fprintf(stderr,"[aln_core] Using SIMT with grid size: %u, block size: %d.\n[aln_core] ", gridsize,blocksize) ;
+
+				fprintf(stderr,"[aln_core] Processing %d sequence reads at a time.\n[aln_core] ", (gridsize*blocksize)) ;
 			}
 #if DEBUG_LEVEL > 0
 			fprintf(stderr,"\n[aln_debug] Processing %d sequences.", no_of_sequences);
@@ -2950,7 +3028,7 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 						}
 
 						while(cur_el) {
-							bwt_aln1_t alignment = cur_el->val;
+							barracuda_aln1_t alignment = cur_el->val;
 							int cur_len = main_sequences_index[cur_el->sequence_id].y;
 							//print some info
 							printf("Sequence: %d,  a:%d, k: %d, l: %d, mm: %d, gape: %d, gapo: %d, length: %d, processed: %d\n",cur_el->sequence_id, alignment.a, alignment.k, alignment.l, alignment.n_mm, alignment.n_gape, alignment.n_gapo, cur_len, cur_el->start_pos);
@@ -2977,7 +3055,7 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 					align_store_lst * tmp;
 
 					while(cur_el  && max_process > last_index+1) {
-						bwt_aln1_t alignment = cur_el->val;
+						barracuda_aln1_t alignment = cur_el->val;
 
 
 						// add alignment to the new store
@@ -2988,8 +3066,8 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 						store_entry->start_pos = cur_el->start_pos + pass_length;
 
 						store_entry->sequence_id = cur_el->sequence_id;
-						store_entry->init.best_cnt = alignment.best_cnt;
-						store_entry->init.best_diff = alignment.best_diff;
+		//				store_entry->init.best_cnt = alignment.best_cnt;
+		//				store_entry->init.best_diff = alignment.best_diff;
 						store_entry->init.cur_n_gape = alignment.n_gape;
 						store_entry->init.cur_n_gapo = alignment.n_gapo;
 						store_entry->init.cur_n_mm = alignment.n_mm;
@@ -3076,23 +3154,47 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 
 				if (tmp->no_of_alignments)
 				{
-					bwt_aln1_t * output;
-					output = (bwt_aln1_t*)malloc(tmp->no_of_alignments*sizeof(bwt_aln1_t));
 
-					for (int j = 0; j < tmp->no_of_alignments; j++)
+					if(opt->bwa_output)
 					{
-						bwt_aln1_t * temp_output = output + j;
-						temp_output->a = tmp->alignment_info[j].a;
-						temp_output->k = tmp->alignment_info[j].k;
-						temp_output->l = tmp->alignment_info[j].l;
-						temp_output->n_mm = tmp->alignment_info[j].n_mm;
-						temp_output->n_gapo = tmp->alignment_info[j].n_gapo;
-						temp_output->n_gape = tmp->alignment_info[j].n_gape;
-						temp_output->score = tmp->alignment_info[j].score;
+						bwt_aln1_t * output;
+						output = (bwt_aln1_t*)malloc(tmp->no_of_alignments*sizeof(bwt_aln1_t));
+
+						for (int j = 0; j < tmp->no_of_alignments; j++)
+						{
+							bwt_aln1_t * temp_output = output + j;
+							temp_output->a = tmp->alignment_info[j].a;
+							temp_output->k = tmp->alignment_info[j].k;
+							temp_output->l = tmp->alignment_info[j].l;
+							temp_output->n_mm = tmp->alignment_info[j].n_mm;
+							temp_output->n_gapo = tmp->alignment_info[j].n_gapo;
+							temp_output->n_gape = tmp->alignment_info[j].n_gape;
+							temp_output->score = tmp->alignment_info[j].score;
+						}
+						if(tmp->no_of_alignments > 1) aln_quicksort2(output,0,tmp->no_of_alignments-1);
+						fwrite(output, sizeof(bwt_aln1_t), tmp->no_of_alignments, stdout);
+						free(output);
+					}else
+					{
+						barracuda_aln1_t * output;
+						output = (barracuda_aln1_t*)malloc(tmp->no_of_alignments*sizeof(barracuda_aln1_t));
+
+						for (int j = 0; j < tmp->no_of_alignments; j++)
+						{
+							barracuda_aln1_t * temp_output = output + j;
+							temp_output->a = tmp->alignment_info[j].a;
+							temp_output->k = tmp->alignment_info[j].k;
+							temp_output->l = tmp->alignment_info[j].l;
+							temp_output->n_mm = tmp->alignment_info[j].n_mm;
+							temp_output->n_gapo = tmp->alignment_info[j].n_gapo;
+							temp_output->n_gape = tmp->alignment_info[j].n_gape;
+							temp_output->score = tmp->alignment_info[j].score;
+						}
+
+						fwrite(output, sizeof(barracuda_aln1_t), tmp->no_of_alignments, stdout);
+						free(output);
 					}
 
-					fwrite(output, sizeof(bwt_aln1_t), tmp->no_of_alignments, stdout);
-					free(output);
 				}
 			}
 
@@ -3100,37 +3202,6 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 
 
 
-			#if MYBINARY== 1
-			//fprintf(stderr,"[aln_debug] writing custom binary") ;
-
-			for (int  i = 0; i < run_no_sequences; ++i)
-			{
-				alignment_store_t* tmp = global_alignment_store_host_final + i;
-				fwrite(&tmp->no_of_alignments, 4, 1, mybinary);
-
-				if (tmp->no_of_alignments)
-				{
-					bwt_aln1_t * output;
-					output = (bwt_aln1_t*)malloc(tmp->no_of_alignments*sizeof(bwt_aln1_t));
-
-					for (int j = 0; j < tmp->no_of_alignments; j++)
-					{
-						bwt_aln1_t * temp_output = output + j;
-						temp_output->a = tmp->alignment_info[j].a;
-						temp_output->k = tmp->alignment_info[j].k;
-						temp_output->l = tmp->alignment_info[j].l;
-						temp_output->n_mm = tmp->alignment_info[j].n_mm;
-						temp_output->n_gapo = tmp->alignment_info[j].n_gapo;
-						temp_output->n_gape = tmp->alignment_info[j].n_gape;
-						temp_output->score = tmp->alignment_info[j].score;
-					}
-
-					fwrite(output, sizeof(bwt_aln1_t), tmp->no_of_alignments, mybinary);
-					free(output);
-				}
-			}
-
-			#endif // MYBINARY == 1
 
 			gettimeofday (&end, NULL);
 			time_used = diff_in_seconds(&end,&start);
@@ -3143,10 +3214,6 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 			gettimeofday (&start, NULL);
 			loopcount ++;
 		}
-#if MYBINARY== 1
-		// clean up fp
-		fclose(mybinary);
-#endif // MYBINARY == 1
 
 		fprintf(stderr, "\n");
 
@@ -3256,26 +3323,46 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 			//fprintf(stderr, "Finished!  Time taken: %0.2fs  %d sequences analyzed.\n(%.2f sequences/sec)\n\n", time_used, no_of_sequences, no_of_sequences/time_used );
 			#if OUTPUT_ALIGNMENTS == 1
 			gettimeofday (&start, NULL);
-			fprintf(stderr, "[bwa_aln_core] Writing to the disk... ");
+			fprintf(stderr, "[bwa_aln_core] Writing to the disk... \n");
 
 
 
 			#if STDOUT_BINARY_RESULT == 1
-			for (int i = 0; i < no_of_sequences; ++i) {
-				bwa_seq_t *p = seqs + i;
-				fwrite(&p->n_aln, 4, 1, stdout);
-				if (p->n_aln) fwrite(p->aln, sizeof(bwt_aln1_t), p->n_aln, stdout);
+
+			if(opt->bwa_output)
+			{
+				//fprintf(stderr, "[aln_debug] Outputing in bwa-compatible file format... ");
+				for (int i = 0; i < no_of_sequences; ++i) {
+						bwa_seq_t *p = seqs + i;
+						bwt_aln1_t * output;
+						output = (bwt_aln1_t*)malloc(p->n_aln*sizeof(bwt_aln1_t));
+
+						for (int j = 0; j < p->n_aln; j++)
+						{
+							barracuda_aln1_t * temp = p->aln + j;
+							bwt_aln1_t * temp_out = output + j;
+							temp_out->a = temp->a;
+							temp_out->k = temp->k;
+							temp_out->l = temp->l;
+							temp_out->n_mm = temp->n_mm;
+							temp_out->n_gapo = temp->n_gapo;
+							temp_out->n_gape = temp->n_gape;
+						}
+
+						if(p->n_aln > 1) aln_quicksort2(output,0,p->n_aln-1);
+						fwrite(&p->n_aln, 4, 1, stdout);
+						if (p->n_aln) fwrite(output, sizeof(bwt_aln1_t), p->n_aln, stdout);
+				}
+			}else
+			{
+				for (int i = 0; i < no_of_sequences; ++i) {
+					bwa_seq_t *p = seqs + i;
+
+					fwrite(&p->n_aln, 4, 1, stdout);
+					if (p->n_aln) fwrite(p->aln, sizeof(barracuda_aln1_t), p->n_aln, stdout);
+				}
 			}
 			#endif // STDOUT_BINARY_RESULT == 1
-
-
-			#if MYBINARY == 1
-			for (int i = 0; i < no_of_sequences; ++i) {
-				bwa_seq_t *p = seqs + i;
-				fwrite(&p->n_aln, 4, 1, mybinary);
-				if (p->n_aln) fwrite(p->aln, sizeof(bwt_aln1_t), p->n_aln, mybinary);
-			}
-			#endif // MYBINARY == 1
 
 
 			#if STDOUT_STRING_RESULT == 1
@@ -3288,7 +3375,7 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 							printf("Sequence %d, no of alignments: %d\n", i, p->n_aln);
 							for (int j = 0; j < p->n_aln && j < MAX_NO_OF_ALIGNMENTS; j++)
 								{
-									bwt_aln1_t * temp = p->aln + j;
+									barracuda_aln1_t * temp = p->aln + j;
 									printf("  Aligned read %d, ",j+1);
 									printf("a: %d, ", temp->a);
 									printf("n_mm: %d, ", temp->n_mm);
@@ -3309,7 +3396,7 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 			time_used = diff_in_seconds(&end,&start);
 			total_calculation_time_used += time_used;
 			total_time_used += time_used;
-			fprintf(stderr, "%0.2f sec\n", time_used);
+			//fprintf(stderr, "%0.2f sec\n", time_used);
 			#endif // OUTPUT_ALIGNMENTS == 1
 
 			gettimeofday (&start, NULL);
@@ -3335,15 +3422,12 @@ void barracuda_bwa_aln_core(const char *prefix, const char *fn_fa, gap_opt_t *op
 int bwa_aln(int argc, char *argv[])
 {
 	int c, opte = -1;
-	gap_opt_t *opt;
+	barracuda_gap_opt_t *opt;
 	unsigned char cuda_opt = 0;
-	// 0 = default
-	// 1 = forward only
-	// 2 = reverse only
 
 	fprintf(stderr, "Barracuda, Version %s\n",PACKAGE_VERSION);
 	opt = gap_init_opt();
-	while ((c = getopt(argc, argv, "s:a:C:n:o:e:i:d:l:k:cLR:m:t:NM:O:E")) >= 0) {
+	while ((c = getopt(argc, argv, "s:a:C:n:o:e:i:d:l:k:cbLR:m:t:NM:O:E")) >= 0) {
 		switch (c) {
 		case 'a': opt->max_aln = atoi(optarg); break;
 		case 's': opt->mid = atoi(optarg); break;
@@ -3367,9 +3451,7 @@ int bwa_aln(int argc, char *argv[])
 		case 'R': opt->max_top2 = atoi(optarg); break;
 		case 'c': opt->mode &= ~BWA_MODE_COMPREAD; break;
 		case 'N': opt->mode |= BWA_MODE_NONSTOP; opt->max_top2 = 0x7fffffff; break;
-//		case 'r': cuda_opt = 2; break;
-//		case 'f': cuda_opt = 1; break;
-//		case 'x': opt->split_kernel = 1; break;
+		case 'b': opt->bwa_output = 1; break;
 		default: return 1;
 		}
 	}
@@ -3377,7 +3459,6 @@ int bwa_aln(int argc, char *argv[])
 		opt->max_gape = opte;
 		opt->mode &= ~BWA_MODE_GAPE;
 	}
-
 
 	if (optind + 2 > argc) {
 		fprintf(stderr, "\nBWT alignment module using NVIDIA CUDA");
@@ -3399,24 +3480,19 @@ int bwa_aln(int argc, char *argv[])
 		fprintf(stderr, "         -M INT  mismatch penalty [default: %d]\n", opt->s_mm);
 		fprintf(stderr, "         -O INT  gap open penalty [default: %d]\n", opt->s_gapo);
 		fprintf(stderr, "         -E INT  gap extension penalty [default: %d]\n", opt->s_gape);
+		fprintf(stderr, "         -L      log-scaled gap penalty for long deletions\n");
 		fprintf(stderr, "         -R INT  stop searching when >INT equally best hits are found [default: %d]\n", opt->max_top2);
 		fprintf(stderr, "         -c      reverse by not complement input sequences for colour space reads\n");
-		fprintf(stderr, "         -L      log-scaled gap penalty for long deletions\n");
 		fprintf(stderr, "         -N      non-iterative mode: search for all n-difference hits.\n");
 		fprintf(stderr, "                 CAUTION this is extremely slow\n");
-		fprintf(stderr, "         -s INT  Skip the first INT bases (MID Tag) for alignment.\n");
+//		fprintf(stderr, "         -s INT  Skip the first INT 5' bases for alignment.\n");
 		fprintf(stderr, "         -t INT  revert to original BWA with INT threads [default: %d]\n", opt->n_threads);
 		fprintf(stderr, "                 cannot use with -C, or -a\n");
+		fprintf(stderr, "         -b      Output SA coordinates in BWA 0.5.x readable sai format.\n");
 		fprintf(stderr, "\n");
 		fprintf(stderr, "CUDA only options:\n");
 		fprintf(stderr, "         -C INT  Specify which CUDA device to use. [default: auto-detect] \n");
 		fprintf(stderr, "         -a INT  maximum number of alignments on each strand, max: 20 [default: %d]\n", opt->max_aln);
-//		fprintf(stderr, "         -f      single strand mode: align the forward strand only\n"); //function depreciated
-//		fprintf(stderr, "         -r      single strand mode: align the reverse complementary strand only\n");//function depreciated
-//		fprintf(stderr, "         -x      use split kernels\n");
-
-
-
 		fprintf(stderr, "\n");
 		return 1;
 	}
@@ -3542,18 +3618,48 @@ int detect_cuda_device()
 //////////////////////////////////////////
 
 //////////////////////////////////////////
-// Below is code for BarraCUDA CUDA SAMSE core
+// Below is code for BarraCUDA CUDA samse_core
 //////////////////////////////////////////
 #if CUDA_SAMSE == 1
-//CUDA global variables
-__device__ __constant__ bwt_t bwt_rbwt_cuda[2];
-__device__ __constant__ uint32_t bwt_rbwt_offset[2];
-__device__ __constant__ bwtint_t bwt_rbwt_sa_offset[2];
-__device__ __constant__ bwtint_t bwt_rbwt_n_sa[2];
+
+void report_cuda_error_GPU(const char *message)
+{
+	cudaError_t cuda_err = cudaGetLastError();
+
+	if(cudaSuccess != cuda_err)
+	{
+		fprintf(stderr,"%s\n",message);
+		fprintf(stderr,"%s\n", cudaGetErrorString(cuda_err));
+		exit(1);
+	}
+}
+
+void report_cuda_error_GPU(cudaError_t cuda_error, const char *message)
+{
+	if(cudaSuccess != cuda_error)
+	{
+		fprintf(stderr,"%s\n",message);
+		fprintf(stderr,"%s\n", cudaGetErrorString(cuda_error));
+		exit(1);
+	}
+}
+
+void report_cuda_error_CPU(const char * message)
+{
+	fprintf(stderr,"%s\n",message);
+	exit(1);
+}
+
+
+// Texture.
+texture<bwtint_t, 1, cudaReadModeElementType> sa_tex;
+texture<bwtint_t, 1, cudaReadModeElementType> bwt_sa_tex;
+texture<bwtint_t, 1, cudaReadModeElementType> rbwt_sa_tex;
+texture<int, 1, cudaReadModeElementType> g_log_n_tex;
+
+// Variables for information to do with GPU or software (e.g., no. of blocks).
 
 const static int BLOCK_SIZE2 = 128;
-
-static int N_MP;
 
 static bwa_maxdiff_mapQ_t *seqs_maxdiff_mapQ_ho;
 static bwa_maxdiff_mapQ_t *seqs_maxdiff_mapQ_de;
@@ -3563,443 +3669,235 @@ static uint8_t *seqs_mapQ_ho;
 static uint8_t *seqs_mapQ_de;
 static bwtint_t *seqs_pos_ho;
 static bwtint_t *seqs_pos_de;
-static uint32_t *bwt_rbwt_de = 0;
-static bwtint_t *bwt_rbwt_sa_de = 0;
-static int *g_log_n_de;
-bwtint_t bwt_sa_intv = 0, rbwt_sa_intv = 0;
-
-texture<uint,2,cudaReadModeElementType> bwt_rbwt_occ_array1;
-texture<uint4,2,cudaReadModeElementType> bwt_rbwt_occ_array4;
-texture<bwtint_t, 1, cudaReadModeElementType> sa_tex;
-texture<bwtint_t, 1, cudaReadModeElementType> bwt_rbwt_sa_tex;
-texture<int, 1, cudaReadModeElementType> g_log_n_tex;
-
-//Functions for OCC calculation using 2D texture
-#define BWT_RBWT_OCC1(coord_1D) (tex2D(bwt_rbwt_occ_array1,coord_1D & 0xFFFF,coord_1D >> 16))
-#define BWT_RBWT_OCC4(coord_1D) (tex2D(bwt_rbwt_occ_array4,(coord_1D & 0xFFFF)>>2,coord_1D >> 16))
-
-unsigned long long copy_bwts_to_cuda_memory_for_samcores(const char * prefix)
-// bwt occurrence array to global and bind to texture, bwt structure to constant memory. bwt and
-// rbwt are in a joint variable in a 2D texture. [0] = rbwt, [1] = bwt
-{
-	bwt_t * bwt_src;
-	char str[100];
-	unsigned long long size_read = 0;
 
 
-    cudaChannelFormatDesc channelDesc1 = cudaCreateChannelDesc<uint>();
-    cudaChannelFormatDesc channelDesc4 = cudaCreateChannelDesc<uint4>();
-    size_t pitch_mem_size;
-    int n_col = 0x10000; // 2^16, 65536 elements in a column.
-    int n_row_per_strand;
-    int n_bp_per_strand;// = bwt_src->bwt_size;
-    int mod;
-    int extra_row;
-    uint32_t offset;
-    int n_elem_next;
-    uint32_t offset_ho[2];
-    bwt_t bwt_ho[2];
-    size_t mem_available, total_mem;
-	cudaMemGetInfo(&mem_available, &total_mem);
-
-	bwtint_t n_sa[2];
-    bwtint_t bwt_rbwt_sa_offset_ho[2];
-    bwtint_t sa_offset;
-
-
-#if DEBUG_LEVEL  > 1
-	cudaMemGetInfo(&mem_available, &total_mem);
-	fprintf(stderr,"[SAMSE debug] mem available %d MB\n", int(mem_available>>20));
-#endif
-	{
-	    //Reversed BWT
-		//Load bwt occurrence array from from disk
-		//TODO: BWT already loaded before remove the line below!
-		strcpy(str, prefix); strcat(str, ".rbwt");  bwt_src = bwt_restore_bwt(str);
-		strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt_src);
-		n_sa[0] = bwt_src->n_sa;
-		sa_offset = n_sa[0];
-		rbwt_sa_intv = bwt_src->sa_intv; //store in global variable rbwt_sa_intv
-		size_read += bwt_src->bwt_size*sizeof(uint32_t);
-
-		n_bp_per_strand = bwt_src->bwt_size;
-		n_row_per_strand = n_bp_per_strand >> 16;
-		mod = n_bp_per_strand - (n_row_per_strand << 16);
-		extra_row = n_row_per_strand == 0 ? 0 : 1;
-		offset = (n_row_per_strand+extra_row)*n_col;
-
-		//fprintf(stderr,"1.0 %u %i %i %i %i %i\n", bwt_src->bwt_size, n_row_per_strand,n_col,mod,extra_row,offset);
-
-		//Allocate memory for bwt,rbwt
-		cudaMallocPitch((void**) &bwt_rbwt_de, &pitch_mem_size, sizeof(uint32_t)*n_col, 2*(n_row_per_strand+extra_row));
-		report_cuda_error_GPU("cudaMallocPitch bwt_rbwt_de,\n");
-
-		// Copy full rows.
-	    if (n_row_per_strand > 0)
-	    {
-	        cudaMemcpy2D(bwt_rbwt_de,pitch_mem_size,bwt_src->bwt,pitch_mem_size,pitch_mem_size,n_row_per_strand,cudaMemcpyHostToDevice);
-	        report_cuda_error_GPU("cudaMemcpy2D bwt_rbwt_de <- bwt_src->bwt\n");
-
-	        n_elem_next = n_row_per_strand*n_col;
-	    }
-
-	    // Copy partial row.
-	    if (mod > 0)
-	    {
-	        uint32_t *buf = (uint32_t *) malloc(sizeof(uint32_t)*n_col);
-
-	        for (int i0 = 0; i0 < mod; i0++)
-	            buf[i0] = bwt_src->bwt[n_elem_next+i0];
-
-	        cudaMemcpy2D(bwt_rbwt_de+n_elem_next,pitch_mem_size,buf,pitch_mem_size,pitch_mem_size,1,cudaMemcpyHostToDevice);
-	        report_cuda_error_GPU("cudaMemcpy2D bwt_rbwt_de+n_elem_next <- buf\n");
-
-	        free(buf);
-	    }
-
-        //copy bwt structure data to copy
-        bwt_ho[0] = *bwt_src;
-
-
-        //fprintf (stderr,"1.0 %u %u %i\n", n_sa[0],n_sa[1],offset);
-
-        //Allocate memory for both bwt->sa,rbwt->sa
-        cudaMalloc((void**) &bwt_rbwt_sa_de,sizeof(bwtint_t)*n_sa[0]*2);
-        report_cuda_error_GPU("cudaMalloc bwt_rbwt_sa_de,\n");
-
-        // Copy rbwt_sa data to device.
-        cudaMemcpy(bwt_rbwt_sa_de,bwt_src->sa,sizeof(bwtint_t)*n_sa[0],cudaMemcpyHostToDevice);
-        report_cuda_error_GPU("cudaMemcpy bwt_rbwt_sa_de <- rbwt_src->sa\n");
-
-        // Copy offset size to copy.constant memory.
-        bwt_rbwt_sa_offset_ho[0] = 0;
-
-	    bwt_destroy(bwt_src);
-	}
-
-
-
-#if DEBUG_LEVEL  > 1
-	cudaMemGetInfo(&mem_available, &total_mem);
-	fprintf(stderr,"[SAMSE debug] bwt loaded, mem available %d MB\n", int(mem_available>>20));
-#endif
-
-
-    {
-        //Forward BWT
-        //Load bwt occurrence array from from disk
-		//TODO: BWT already loaded before remove the line below!
-        strcpy(str, prefix); strcat(str, ".bwt"); bwt_src = bwt_restore_bwt(str);
-		strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt_src);
-		n_sa[1]=bwt_src->n_sa;
-		bwt_sa_intv = bwt_src->sa_intv; //store in global variable bwt_sa_intv
-        size_read += bwt_src->bwt_size*sizeof(uint32_t);
-
-
-        // Copy full rows.
-        if (n_row_per_strand > 0)
-        {
-            cudaMemcpy2D(bwt_rbwt_de+offset,pitch_mem_size,bwt_src->bwt,pitch_mem_size,pitch_mem_size,n_row_per_strand,cudaMemcpyHostToDevice);
-            report_cuda_error_GPU("cudaMemcpy2D bwt_rbwt_de+offset <- bwt_src->bwt\n");
-        }
-
-        // Copy partial row.
-        if (mod > 0)
-        {
-            uint32_t *buf = (uint32_t *) malloc(sizeof(uint32_t)*n_col);
-
-            for (int i0 = 0; i0 < mod; i0++)
-                buf[i0] = bwt_src->bwt[n_elem_next+i0];
-
-            cudaMemcpy2D(bwt_rbwt_de+offset+n_elem_next,pitch_mem_size,buf,pitch_mem_size,pitch_mem_size,1,cudaMemcpyHostToDevice);
-            report_cuda_error_GPU("cudaMemcpy2D bwt_rbwt_de+offset+n_elem_next <- buf\n");
-
-            free(buf);
-        }
-
-        //copy bwt structure data to copy
-        bwt_ho[1] = *bwt_src;
-
-
-        // Copy bwtdata to device.
-        cudaMemcpy(bwt_rbwt_sa_de+sa_offset,bwt_src->sa,sizeof(bwtint_t)*n_sa[1],cudaMemcpyHostToDevice);
-        report_cuda_error_GPU("cudaMemcpy rbwt_rbwt_sa_de+offset <- bwt_src->sa\n");
-
-        // Copy offset size to copy.
-        bwt_rbwt_sa_offset_ho[1] = sa_offset;
-
-        bwt_destroy(bwt_src);
-    }
-
-#if DEBUG_LEVEL  > 1
-	cudaMemGetInfo(&mem_available, &total_mem);
-	fprintf(stderr,"[SAMSE debug] rbwt loaded, mem available %d MB\n", int(mem_available>>20));
-#endif
-
-    // Copy offset size to constant memory.
-    offset_ho[0] = 0;
-    offset_ho[1] = offset;
-    cudaMemcpyToSymbol(bwt_rbwt_offset,&offset_ho,sizeof(uint32_t)*2,0,cudaMemcpyHostToDevice);
-    report_cuda_error_GPU("cudaMemcpyToSymbol bwt_rbwt_offset[1] <- offset\n");
-
-    //copy bwt structure data to constant memory bwt_rbwt_cuda structure
-    cudaMemcpyToSymbol(bwt_rbwt_cuda,&bwt_ho,sizeof(bwt_t)*2,0,cudaMemcpyHostToDevice);
-    report_cuda_error_GPU("cudaMemcpyToSymbol bwt_rbwt_cuda <- bwt_src\n");
-
-    //fprintf(stderr,"r/bwt: %u %u\n",rbwt->n_sa,bwt->n_sa);
-    //fprintf(stderr,"r/bwt_ho: %u %u\n",bwt_ho[1].n_sa,bwt_ho[0].n_sa);
-
-    // Bind memory to texture.
-    cudaBindTexture2D(0,&bwt_rbwt_occ_array1,bwt_rbwt_de,&channelDesc1,n_col,2*(n_row_per_strand+extra_row),pitch_mem_size);
-    report_cuda_error_GPU("cudaBindTexture2D bwt_rbwt_occ_array1\n");
-
-    cudaBindTexture2D(0,&bwt_rbwt_occ_array4,bwt_rbwt_de,&channelDesc4,(n_col>>2),2*(n_row_per_strand+extra_row),pitch_mem_size);
-    report_cuda_error_GPU("cudaBindTexture2D bwt_rbwt_occ_array4\n");
-
-//From sa
-
-    // Copy offset size constant memory.
-    cudaMemcpyToSymbol(bwt_rbwt_sa_offset,bwt_rbwt_sa_offset_ho,sizeof(bwtint_t)*2,0,cudaMemcpyHostToDevice);
-    report_cuda_error_GPU("cudaMemcpyToSymbol rbwt_rbwt_sa_offset <- 0, bwt_s->n_sa\n");
-
-    // Bind memory to texture.
-    cudaBindTexture(0,bwt_rbwt_sa_tex,bwt_rbwt_sa_de,sizeof(bwtint_t)*(n_sa[0])*2);
-    report_cuda_error_GPU("cudaBindTexture bwt_rbwt_sa_tex\n");
-
-    // Copy (r)bwt.n_sa to constant memory (because it does not exist in "bwt_rbwt_cuda").
-    cudaMemcpyToSymbol(bwt_rbwt_n_sa,&n_sa,sizeof(bwtint_t)*2,0,cudaMemcpyHostToDevice);
-
-
-	return size_read;
-}
-
-void free_bwts_from_cuda_memory_for_samcores()
-{
-    if ( bwt_rbwt_de != 0 )
-    {
-        cudaUnbindTexture(bwt_rbwt_occ_array1);
-        cudaUnbindTexture(bwt_rbwt_occ_array4);
-        cudaFree(bwt_rbwt_de);
-    }
-}
-
-int prepare_bwa_cal_pac_pos_cuda(
+int prepare_bwa_cal_pac_pos_cuda1(
+    unsigned int **global_bwt,
+    unsigned int **global_rbwt,
     const char *prefix,
+    bwtint_t **bwt_sa_de,
+    bwtint_t **rbwt_sa_de,
+    const bwt_t *bwt,
+    const bwt_t *rbwt,
     const int *g_log_n_ho,
+    int **g_log_n_de,
     const int g_log_n_len,
-    const int n_seqs_max,
     int device)
 {
-    unsigned long long int bwt_read_size;
-    cudaDeviceProp prop;
-    //int device = -1; //set default device to -1 unless it is specified by user
-    size_t mem_available, total_mem;
+    // mem_available in bytes not MiB
+    size_t mem_available,total_mem;
 
-
-	if(device >= 0)
-	{
-		fprintf(stderr,"[samse_core] Using specified CUDA device %d.\n",device);
-	}
-    //auto device selection
-	if (device < 0)
-	{
-		device = detect_cuda_device();
-
-		if(device >= 0)
-		{
-			cudaSetDevice(device);
-		}
-		else
-		{
-			fprintf(stderr,"[samse_core]Error! Cannot find a suitable CUDA device, Aborting...\n");
-			return -1;
-		}
-
-	}else
-	{
-		cudaSetDevice(device);
-
-	}
-
-	cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
-	cudaMemGetInfo(&mem_available, &total_mem);
+    cudaSetDevice(device);
+    cudaMemGetInfo(&mem_available, &total_mem);
 
     ////////////////////////////////////////////////////////////
     // Load BWT to GPU.
     ////////////////////////////////////////////////////////////
-    cudaGetDeviceProperties(&prop, device);
 
-    // For timing purpose only
-	struct timeval start, end;
-	double time_used;
+    // copy_bwt_occ_array_to_cuda_memory
+
+	unsigned long long size_read = 0;
+
+		if ( bwt != 0 )
+		{
+			//Original BWT
+			size_read += bwt->bwt_size*sizeof(uint32_t);
+
+			mem_available = mem_available - size_read;
+
+			if(mem_available > 0)
+			{
+				//Allocate memory for bwt
+				cudaMalloc((void**)global_bwt, bwt->bwt_size*sizeof(uint32_t));
+				//copy bwt occurrence array from host to device and dump the bwt to save CPU memory
+				cudaMemcpy (*global_bwt, bwt->bwt, bwt->bwt_size*sizeof(uint32_t), cudaMemcpyHostToDevice);
+				//bind global variable bwt to texture memory bwt_occ_array
+				cudaBindTexture(0, bwt_occ_array, *global_bwt, bwt->bwt_size*sizeof(uint32_t));
+				//copy bwt structure data to constant memory bwt_cuda structure
+				cudaMemcpyToSymbol ( bwt_cuda, bwt, sizeof(bwt_t), 0, cudaMemcpyHostToDevice);
+			}
+			else
+			{
+				fprintf(stderr,"[samse_core] Not enough device memory to continue.\n");
+				return 0;
+			}
 
 
-	fprintf(stderr,"[samse_core] Loading BWTs, please wait..");
-	// load forward & reverse bwts
-	gettimeofday (&start, NULL);
-
-    bwt_read_size = copy_bwts_to_cuda_memory_for_samcores(prefix);
-    // copy_bwt_to_cuda_memory
-    // returns 0 if error occurs
-
-	gettimeofday (&end, NULL);
-	time_used = diff_in_seconds(&end,&start);
-
-	fprintf(stderr, "Done! \n[samse_core] Time used: %0.2fs\n", time_used);
+	#if DEBUG_LEVEL > 0
+			fprintf(stderr,"[samse_debug] bwt loaded, mem left: %d MB\n", (int)(mem_available>>20));
+	#endif
+		}
+		if ( rbwt != 0 )
+		{
+			//Reversed BWT
+			size_read += bwt->bwt_size*sizeof(uint32_t);
+			mem_available = mem_available - (bwt->bwt_size*sizeof(uint32_t));
 
 
-    cudaMemGetInfo(&mem_available, &total_mem);
-    if (int(mem_available>>20)<0)
-    {
-    	fprintf(stderr,"[samse_core]Not enough memory available! Aborting...\n");
-    	return -1;
-    }
+	#if DEBUG_LEVEL > 0
+			fprintf(stderr,"[samse_debug] rbwt loaded mem left: %d MB\n", (int)(mem_available>>20));
+	#endif
 
-#if DEBUG_LEVEL  > 1
-	cudaMemGetInfo(&mem_available, &total_mem);
-	fprintf(stderr,"[SAMSE debug] finished loading BWTs, mem available %d MB\n", int(mem_available>>20));
-#endif
+			if (mem_available > 0)
+			{
+				//Allocate memory for rbwt
+				cudaMalloc((void**)global_rbwt, rbwt->bwt_size*sizeof(uint32_t));
+				//copy reverse bwt occurrence array from host to device and dump the bwt to save CPU memory
+				cudaMemcpy (*global_rbwt, rbwt->bwt, rbwt->bwt_size*sizeof(uint32_t), cudaMemcpyHostToDevice);
+				//bind global variable rbwt to texture memory rbwt_occ_array
+				cudaBindTexture(0, rbwt_occ_array, *global_rbwt, rbwt->bwt_size*sizeof(uint32_t));
+				//copy rbwt structure data to constant memory bwt_cuda structure
+				cudaMemcpyToSymbol ( rbwt_cuda, rbwt, sizeof(bwt_t), 0, cudaMemcpyHostToDevice);
+			}
+			else
+			{
+				fprintf(stderr,"[samse_core] Not enough device memory to continue.\n");
+				return 0;
+			}
 
-    if (bwt_read_size == 0)
-    {
-    	report_cuda_error_CPU("[samse_core] Error copying BWT and RBWT to device.\n");
-    	return -1;
-    }
+		}
+
+	// returns 0 if error occurs
 
     ////////////////////////////////////////////////////////////
     // Copy input data in "g_log_n" to device, and bind texture of "g_log_n_de".
     ////////////////////////////////////////////////////////////
-    copy_g_log_n_cuda(g_log_n_ho,g_log_n_len);
-
-#if DEBUG_LEVEL  > 1
-	cudaMemGetInfo(&mem_available, &total_mem);
-	fprintf(stderr,"[SAMSE debug] finished loading g_log_n, mem available %d MB\n", int(mem_available>>20));
-#endif
-
-
-	////////////////////////////////////////////////////////////
-    // Prepare buffers for sequences.
-    ////////////////////////////////////////////////////////////
-    prepare_bwa_cal_pac_pos_seqs_cuda(n_seqs_max);
-
-#if DEBUG_LEVEL > 1
-	cudaMemGetInfo(&mem_available, &total_mem);
-	fprintf(stderr,"[SAMSE debug] finished allocating buffers, mem available %d MB\n", int(mem_available>>20));
-#endif
-
-    cudaMemGetInfo(&mem_available, &total_mem);
-    if (int(mem_available>>20) < 50) // in MiB
-    {
-    	fprintf(stderr,"[samse_core]Not enough memory available! Aborting...\n");
-    	return -1;
-    }
-
-	return device;
-}
-
-void copy_g_log_n_cuda(const int *g_log_n_ho,const int g_log_n_len)
-{
     // Reserve memory.
-    cudaMalloc((void**)&g_log_n_de,sizeof(int)*g_log_n_len);
-    report_cuda_error_GPU("Error reserving memory for \"g_log_n_de\".\n");
+    cudaMalloc((void**)g_log_n_de,sizeof(int)*g_log_n_len);
+    report_cuda_error_GPU("[samse_core] Error reserving memory for \"g_log_n_de\".\n");
 
     // Copy data from host to device.
-    cudaMemcpy(g_log_n_de,g_log_n_ho,sizeof(int)*g_log_n_len,cudaMemcpyHostToDevice);
-    report_cuda_error_GPU("Error copying to \"g_log_n_de\".\n");
+    cudaMemcpy(*g_log_n_de,g_log_n_ho,sizeof(int)*g_log_n_len,cudaMemcpyHostToDevice);
+    report_cuda_error_GPU("[samse_core] Error copying to \"g_log_n_de\".\n");
 
     // Bind texture.
-    cudaBindTexture(0,g_log_n_tex,g_log_n_de,sizeof(int)*g_log_n_len);
-    report_cuda_error_GPU("Error binding texture to \"g_log_n_tex\".\n");
+    cudaBindTexture(0,g_log_n_tex,*g_log_n_de,sizeof(int)*g_log_n_len);
+    report_cuda_error_GPU("[samse_core] Error binding texture to \"g_log_n_tex\".\n");
 
-    return;
+    ///////////////////////////////////////////////////////////////////////////////////////////////////
+    // Copy "sa" data of BWT and RBWT to device.
+    ///////////////////////////////////////////////////////////////////////////////////////////////////
+
+    //fprintf(stderr,"[debug] bwt->n_sa: %u\n", bwt->n_sa);
+
+    // Reserve memory for SA (BWT) on device.
+    cudaMalloc(*&bwt_sa_de,sizeof(bwtint_t)*bwt->n_sa);
+    report_cuda_error_GPU("Error reserving memory for \"bwt_sa_de\".\n");
+
+    // Copy SA (BWT) to device.
+    cudaMemcpy(*bwt_sa_de,bwt->sa,sizeof(bwtint_t)*bwt->n_sa,cudaMemcpyHostToDevice);
+    report_cuda_error_GPU("[samse_core] Error copying to \"bwt_sa_de\".\n");
+
+    // Bind texture.
+    cudaBindTexture(0,bwt_sa_tex,*bwt_sa_de,sizeof(bwtint_t)*bwt->n_sa);
+    report_cuda_error_GPU("[samse_core] Error binding texture to \"bwt_sa_tex\".\n");
+
+    // Reserve memory for SA (RBWT) on device.
+    cudaMalloc(*&rbwt_sa_de,sizeof(bwtint_t)*rbwt->n_sa);
+    report_cuda_error_GPU("[samse_core] Error reserving memory for \"rbwt_sa_de\".\n");
+
+    // Copy SA (RBWT) to device.
+    cudaMemcpy(*rbwt_sa_de,rbwt->sa,sizeof(bwtint_t)*rbwt->n_sa,cudaMemcpyHostToDevice);
+    report_cuda_error_GPU("[samse_core] Error copying to \"rbwt_sa_de\".\n");
+
+    // Bind texture.
+    cudaBindTexture(0,rbwt_sa_tex,*rbwt_sa_de,sizeof(bwtint_t)*rbwt->n_sa);
+    report_cuda_error_GPU("[samse_core] Error binding texture to \"rbwt_sa_tex\".\n");
+
+	cudaMemGetInfo(&mem_available, &total_mem);
+#if DEBUG_LEVEL > 0
+	fprintf(stderr,"[samse_debug] sa/rsa loaded mem left: %d MB\n", (int)(mem_available>>20));
+#endif
+    return 1;
 }
 
-void prepare_bwa_cal_pac_pos_seqs_cuda(int n_seqs_max)
+
+void prepare_bwa_cal_pac_pos_cuda2(int n_seqs_max)
 {
-
-	////////////////////////////////////////////////////////////
-	// Allocate memory to input variables "seqs_maxdiff_mapQ_ho" and "seqs_sa_ho" on host.
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
+	// Allocate memory and copy reads in "seqs" to "seqs_maxdiff_mapQ_ho" and "seqs_sa_ho".
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	seqs_maxdiff_mapQ_ho = (bwa_maxdiff_mapQ_t *) malloc(sizeof(bwa_maxdiff_mapQ_t)*n_seqs_max);
-	if (seqs_maxdiff_mapQ_ho == NULL) report_cuda_error_CPU("[samse_core]Error reserving memory for \"seqs_maxdiff_mapq_ho\".\n");
+	if (seqs_maxdiff_mapQ_ho == NULL) report_cuda_error_CPU("[samse_core] Error reserving memory for \"seqs_maxdiff_mapq_ho\".\n");
 	seqs_sa_ho = (bwtint_t *) malloc(sizeof(bwtint_t)*n_seqs_max);
-	if (seqs_sa_ho == NULL) report_cuda_error_CPU("[samse_core]Error reserving memory for \"seqs_sa_ho\".\n");
+	if (seqs_sa_ho == NULL) report_cuda_error_CPU("[samse_core] Error reserving memory for \"seqs_sa_ho\".\n");
 
-    ////////////////////////////////////////////////////////////
-	// Reserve memory for "seqs_maxdiff_mapQ_de" and "seqs_sa_de" on device.
-	////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////////////////////////////
+	// Copy input data in "seqs_maxdiff_mapQ_ho" and "seqs_sa_ho" to device, and bind texture of
+	// "seqs_sa_de".
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Reserve memory.
 	cudaMalloc(&seqs_maxdiff_mapQ_de,sizeof(bwa_maxdiff_mapQ_t)*n_seqs_max);
-	report_cuda_error_GPU("[samse_core]Error reserving memory for \"seqs_maxdiff_mapQ_de\".\n");
+	report_cuda_error_GPU("Error reserving memory for \"seqs_maxdiff_mapQ_de\".\n");
 
 	// Reserve memory.
 	cudaMalloc(&seqs_sa_de,sizeof(bwtint_t)*n_seqs_max);
-	report_cuda_error_GPU("[samse_core]Error reserving memory for \"seqs_sa_de\".\n");
+	report_cuda_error_GPU("Error reserving memory for \"seqs_sa_de\".\n");
 
-	////////////////////////////////////////////////////////////
-	// Reserve memory for output data variables in "seqs_mapQ_ho" and "seqs_pos_ho" on host.
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
+	// Reserve memory for output data variables in "seqs_mapQ_ho" and "seqs_pos_ho" to host.
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	//cudaGetLastError();
 	// Reserve memory for return data "mapQ_ho" and "pos_ho" on the host.
 	seqs_mapQ_ho = (uint8_t *) malloc(sizeof(uint8_t)*n_seqs_max);
-	if (seqs_mapQ_ho == NULL) report_cuda_error_CPU("[samse_core]Error reserving memory for \"seqs_mapQ_ho\".\n");
+	if (seqs_mapQ_ho == NULL) report_cuda_error_CPU("[samse_core] Error reserving memory for \"seqs_mapQ_ho\".\n");
 	seqs_pos_ho = (bwtint_t *) malloc(sizeof(bwtint_t)*n_seqs_max);
-	if (seqs_pos_ho == NULL) report_cuda_error_CPU("[samse_core]Error reserving memory for \"seqs_pos_ho\".\n");
+	if (seqs_pos_ho == NULL) report_cuda_error_CPU("[samse_core] Error reserving memory for \"seqs_pos_ho\".\n");
 
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Reserve memory for output data variables "seqs_mapQ_de" and "seqs_pos_de" on device.
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	cudaMalloc(&seqs_mapQ_de,sizeof(uint8_t)*n_seqs_max);
-	report_cuda_error_GPU("[samse_core]Error reserving memory for \"seqs_mapQ_de\".\n");
+	report_cuda_error_GPU("[samse_core] Error reserving memory for \"seqs_mapQ_de\".\n");
 	cudaMalloc(&seqs_pos_de,sizeof(bwtint_t)*n_seqs_max);
-	report_cuda_error_GPU("[samse_core]Error reserving memory for \"seqs_pos_de\".\n");
+	report_cuda_error_GPU("[samse_core] Error reserving memory for \"seqs_pos_de\".\n");
 
-#if DEBUG_LEVEL  > 1
 	size_t mem_available, total_mem;
+
 	cudaMemGetInfo(&mem_available, &total_mem);
-	fprintf(stderr,"[SAMSE debug] finished loading sequences, mem available %d MB\n", int(mem_available>>20));
+
+#if DEBUG_LEVEL > 0
+	fprintf(stderr,"[samse_debug] sequence loaded loaded mem left: %d MB\n", (int)(mem_available>>20));
 #endif
 
 }
 
-void free_bwa_cal_pac_pos_cuda()
-{
-    free_bwa_cal_pac_pos_bwt_rbwt_cuda();
-    free_bwa_cal_pac_pos_seqs_cuda();
-    return;
-}
-
-void free_bwa_cal_pac_pos_bwt_rbwt_cuda()
+void free_bwa_cal_pac_pos_cuda1(
+    unsigned int *global_bwt,
+    unsigned int *global_rbwt,
+    bwtint_t *bwt_sa_de,
+    bwtint_t *rbwt_sa_de,
+    int *g_log_n_de)
 {
 
     ////////////////////////////////////////////////////////////
     // Clean up data.
     ////////////////////////////////////////////////////////////
     // Erase BWT on GPU device.
-    free_bwts_from_cuda_memory_for_samcores();
+    free_bwts_from_cuda_memory(global_bwt,global_rbwt);
 
     // Delete memory used.
-    cudaFree(bwt_rbwt_sa_de);
+    cudaFree(bwt_sa_de);
+    cudaFree(rbwt_sa_de);
     cudaFree(g_log_n_de);
 
     // Unbind texture to reads.
     //cudaUnbindTexture(sa_tex);
 
-    // Unbind textures to BWT and RBWT.
-    cudaUnbindTexture(bwt_rbwt_sa_tex);
-
     // Unbind texture to "g_log_n_tex".
     cudaUnbindTexture(g_log_n_tex);
 
-    // Free constant memory.
+    // Unbind textures to BWT and RBWT.
+    cudaUnbindTexture(bwt_sa_tex);
+    cudaUnbindTexture(rbwt_sa_tex);
 
 }
 
-void free_bwa_cal_pac_pos_seqs_cuda()
+void free_bwa_cal_pac_pos_cuda2()
 {
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Clean up data.
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	free(seqs_maxdiff_mapQ_ho);
 	cudaFree(seqs_maxdiff_mapQ_de);
 	free(seqs_sa_ho);
@@ -4010,6 +3908,8 @@ void free_bwa_cal_pac_pos_seqs_cuda()
 	cudaFree(seqs_mapQ_de);
 }
 
+
+
 // This function is meant to be a GPU implementation of bwa_cal_pac_pos(). Currently,
 // only the forward strand is being tested for bwt_sa(). After that, test the reverse
 // strand. Lastly, make GPU implementations of bwa_cal_maxdiff() and bwa_approx_mapQ().
@@ -4019,38 +3919,29 @@ void launch_bwa_cal_pac_pos_cuda(
 	bwa_seq_t *seqs,
 	int max_mm,
 	float fnr,
-	//bwt_t *bwt,
-	//bwt_t *rbwt,
 	int device)
 {
 
-#if DEBUG_LEVEL > 1
-	fprintf(stderr, "bwt_sa_intv: %u %i\n",bwt_sa_intv, int(sizeof(bwt_sa_intv)));
-	fprintf(stderr, "rbwt_sa_intv: %u %i\n",rbwt_sa_intv, int(sizeof(rbwt_sa_intv)));
-#endif
+	//fprintf(stderr, "bwt->n_sa: %u %i\n",bwt->n_sa, int(sizeof(bwt->n_sa)));
+	//fprintf(stderr, "bwt->sa_intv: %u %i\n",bwt->sa_intv, int(sizeof(bwt->sa_intv)));
+	//fprintf(stderr, "rbwt->sa_intv: %u %i\n",rbwt->sa_intv, int(sizeof(rbwt->sa_intv)));
 
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Declare and initiate variables.
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 
 	cudaDeviceProp prop;
 	int n_block;
 	int n_seq_per_block;
 	int block_mod;
-	size_t mem_available, total_mem;
 
 	// Obtain information on CUDA devices.
 	cudaGetDeviceProperties(&prop, device);
-	cudaMemGetInfo(&mem_available, &total_mem);
 
-#if DEBUG_LEVEL  > 1
-	fprintf(stderr,"\n[SAMSE debug] selected CUDA device: %d\n", device);
-	cudaMemGetInfo(&mem_available, &total_mem);
-	fprintf(stderr,"[SAMSE debug] finished allocating buffers, mem available %d MB\n", int(mem_available>>20));
-#endif
-	////////////////////////////////////////////////////////////
+
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Allocate memory and copy reads in "seqs" to "seqs_maxdiff_mapQ_ho" and "seqs_sa_ho".
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	for (int i = 0; i < n_seqs; i++)
 	{
 		seqs_maxdiff_mapQ_ho[i].len = seqs[i].len;
@@ -4064,39 +3955,38 @@ void launch_bwa_cal_pac_pos_cuda(
 	}
 
 
-	////////////////////////////////////////////////////////////
-	// Copy input data in "seqs_maxdiff_mapQ_ho" and "seqs_sa_ho" to device.
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
+	// Copy input data in "seqs_maxdiff_mapQ_ho" and "seqs_sa_ho" to device, and bind texture of
+	// "seqs_sa_de".
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Copy data from host to device.
 	cudaMemcpy(seqs_maxdiff_mapQ_de,seqs_maxdiff_mapQ_ho,sizeof(bwa_maxdiff_mapQ_t)*n_seqs,cudaMemcpyHostToDevice);
-	report_cuda_error_GPU("[samse_core]Error copying to \"seqs_maxdiff_mapQ_de\".\n");
+	report_cuda_error_GPU("Error copying to \"seqs_maxdiff_mapQ_de\".\n");
 
 	// Copy data from host to device.
 	cudaMemcpy(seqs_sa_de,seqs_sa_ho,sizeof(bwtint_t)*n_seqs,cudaMemcpyHostToDevice);
-	report_cuda_error_GPU("[samse_core]Error copying to \"seqs_sa_de\".\n");
+	report_cuda_error_GPU("Error copying to \"seqs_sa_de\".\n");
 
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Process bwa_cal_pac_pos_cuda()
-	////////////////////////////////////////////////////////////
-	// Calculate the no. of blocks and sequences per block.
-	calc_n_block1(&N_MP,&n_block,&n_seq_per_block,&block_mod,prop.multiProcessorCount,48,n_seqs);
+	///////////////////////////////////////////////////////////////////////////////////////////////////
+	// No. of blocks.
+	n_block = 2048;
+	// No of sequences per block.
+	n_seq_per_block = n_seqs / n_block;
+	// Extra sequences for the last block.
+	block_mod = n_seqs - n_seq_per_block * n_block;
 
-#if DEBUG_LEVEL > 1
-	fprintf(stderr,"[SAMSE debug] N_MP %i n_block %i n_seq_per_block %i block_mod %i\n", N_MP, n_block, n_seq_per_block, block_mod);
-	fprintf(stderr,"[SAMSE debug] n_seqs %i\n", n_seqs);
-#endif
+	//fprintf(stderr,"N_MP %i n_block %i n_seq_per_block %i block_mod %i\n", N_MP, n_block, n_seq_per_block, block_mod);
+	//fprintf(stderr,"n_seqs %i\n", n_seqs);
+
+
 	// Set block and grid sizes.
-
 	dim3 dimBlock(BLOCK_SIZE2);
 	dim3 dimGrid(n_block);
 
-#if DEBUG_LEVEL > 1
-	fprintf(stderr,"[SAMSE debug] Using block size: %d, grid size: %d\n", BLOCK_SIZE2,n_block);
-#endif
-
 	// Execute bwt_sa function.
-
-	cuda_bwa_cal_pac_pos_parallel1 <<<dimGrid, dimBlock>>>(
+	cuda_bwa_cal_pac_pos_parallel2 <<<dimGrid, dimBlock>>>(
 		seqs_mapQ_de,
 		seqs_pos_de,
 		seqs_maxdiff_mapQ_de,
@@ -4106,37 +3996,27 @@ void launch_bwa_cal_pac_pos_cuda(
 		n_seq_per_block,
 		block_mod,
 		max_mm,
-		fnr,
-		bwt_sa_intv,
-		rbwt_sa_intv);
+		fnr);
 
-	report_cuda_error_GPU("[samse_core]Error running \"cuda_bwa_cal_pac_pos()\".\n");
+	report_cuda_error_GPU("[samse_core] Error running \"cuda_bwa_cal_pac_pos()\".\n");
 	cudaThreadSynchronize();
-	report_cuda_error_GPU("[samse_core]After synchronizing after \"cuda_bwa_cal_pac_pos()\".\n");
+	report_cuda_error_GPU("[samse_core] Error synchronizing after \"cuda_bwa_cal_pac_pos()\".\n");
 
 
-
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Copy data of output data variables in "seqs_mapQ_de" and "seqs_pos_de" to host.
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 
 	// cudaGetLastError();
 	// Return data to host.
 	cudaMemcpy(seqs_mapQ_ho, seqs_mapQ_de, sizeof(uint8_t)*n_seqs, cudaMemcpyDeviceToHost);
-	report_cuda_error_GPU("[samse_core]Error copying to \"seqs_mapQ_ho\".\n");
+	report_cuda_error_GPU("[samse_core] Error copying to \"seqs_mapQ_ho\".\n");
 	cudaMemcpy(seqs_pos_ho, seqs_pos_de, sizeof(bwtint_t)*n_seqs, cudaMemcpyDeviceToHost);
-	report_cuda_error_GPU("[samse_core]Error copying to \"seqs_pos_ho\".\n");
+	report_cuda_error_GPU("[samse_core] Error copying to \"seqs_pos_ho\".\n");
 
-#if DEBUG_LEVEL > 6
-	////////////////////////////////////////////////////////////
-	// Compare GPU data with CPU data to verify results.
-	////////////////////////////////////////////////////////////
-	compare_mapQ_pos(seqs,n_seqs);
-#endif //DEBUG_LEVEL ==7
-
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	// Save output data variables to "seqs".
-	////////////////////////////////////////////////////////////
+	///////////////////////////////////////////////////////////////////////////////////////////////////
 	for (int i = 0; i < n_seqs; i++)
 	{
 	 	seqs[i].mapQ = seqs_mapQ_ho[i];
@@ -4145,91 +4025,134 @@ void launch_bwa_cal_pac_pos_cuda(
 	}
 }
 
-#if DEBUG_LEVEL > 6
-void compare_mapQ_pos(bwa_seq_t *seqs, int n_seqs)
+// This function does not work because the pointer b->bwt is not set.
+__device__ uint32_t _bwt_bwt(const bwt_t *b, bwtint_t k)
 {
-	////////////////////////////////////////////////////////////
-	// Compare GPU data with CPU data to verify results.
-	////////////////////////////////////////////////////////////
+	return ((b)->bwt[(k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL)/16]);
+	//return ((b)->bwt[(k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL >> 4)]);
+}
 
-	int n_fwd = 0;
-	int n_rvs = 0;
-	int n_type[4] = {0, 0, 0, 0};
+__device__ uint32_t _bwt_bwt2(bwtint_t k)
+{
+	//int pos = (k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL) / 16;
+	int pos = (k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL >> 4);
+	uint4 four_integers = tex1Dfetch(bwt_occ_array,pos>>2);
+	uint32_t one_integer;
 
-	for (int i = 0; i < n_seqs; i++)
+	switch (pos & 0x3)
 	{
-		bwa_seq_t *s = seqs + i;
-		if (s->type == BWA_TYPE_UNIQUE || s->type == BWA_TYPE_REPEAT)
-		{
-			if (s->strand)
-			{
-				if (s->mapQ != seqs_mapQ_ho[i]) fprintf(stderr,"mapQ at %i wrong %u %u %u\n", i, s->strand, s->mapQ, seqs_mapQ_ho[i]);
-				//else fprintf(stderr,"mapQ at %i OK %u %u %u\n", i, s->strand, s->mapQ, seqs_mapQ_ho[i]);
-				if (s->seQ != seqs_mapQ_ho[i]) fprintf(stderr,"seQ at %i wrong %u %i %u\n", i, s->strand, int(s->seQ), seqs_mapQ_ho[i]);
-				//if (s->pos != seqs_pos_ho[i]) fprintf(stderr,"pos at %i wrong: %u %u %u %i\n", i, s->strand, s->pos, seqs_pos_ho[i], int(s->pos-seqs_pos_ho[i]));
-				//else fprintf(stderr,"pos at %i OK %u %u %u\n", i, s->strand, s->pos, seqs_pos_ho[i]);
-				n_fwd++;
-			}
-			else
-			{
-                if (s->mapQ != seqs_mapQ_ho[i]) fprintf(stderr,"mapQ at %i wrong %u %u %u\n", i, s->strand, s->mapQ, seqs_mapQ_ho[i]);
-                //else fprintf(stderr,"mapQ at %i OK %u %u %u\n", i, s->strand, s->mapQ, seqs_mapQ_ho[i]);
-                if (s->seQ != seqs_mapQ_ho[i]) fprintf(stderr,"seQ at %i wrong %u %i %u\n", i, s->strand, int(s->seQ), seqs_mapQ_ho[i]);
-                //if (s->pos != seqs_pos_ho[i]) fprintf(stderr,"pos at %i wrong: %u %u %u %i\n", i, s->strand, s->pos, seqs_pos_ho[i], int(s->pos-seqs_pos_ho[i]));
-                //else fprintf(stderr,"pos at %i OK %u %u %u\n", i, s->strand, s->pos, seqs_pos_ho[i]);
-				n_rvs++;
-			}
-		}
-		n_type[s->type]++;
+		case 0: one_integer = four_integers.x; break;
+		case 1: one_integer = four_integers.y; break;
+		case 2: one_integer = four_integers.z; break;
+		case 3: one_integer = four_integers.w; break;
 	}
 
-
-	fprintf(stderr, "n_seqs: %i n_fwd: %i n_rvs: %i\n",n_seqs,n_fwd,n_rvs);
-	fprintf(stderr, "n_type: %i %i %i %i\n",n_type[0],n_type[1],n_type[2],n_type[3]);
+	return one_integer;
 }
-#endif // DEBUG_LEVEL >6
 
-__device__ inline uint4 BWT_RBWT_OCC4b(uint32_t coord_1D,char strand)
-// This function uses joint texture for bwt/rbst
+
+
+__device__ uint32_t _bwt_bwt3(bwtint_t k, texture<uint4, 1, cudaReadModeElementType> *b)
 {
-    coord_1D = coord_1D << 2;
-    coord_1D += bwt_rbwt_offset[strand];
-    return BWT_RBWT_OCC4(coord_1D);
+	//int pos = (k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL) / 16;
+	int pos = (k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL >> 4);
+	uint4 four_integers = tex1Dfetch(*b,pos>>2);
+	uint32_t one_integer;
 
-    //uint32_t pos_x = coord_1D >> 16;
-    //uint32_t pos_y = (coord_1D & 0xFFFF)>>2;
-    //return tex2D(bwt_rbwt_occ_array4,pos_x,pos_y);
+	switch (pos & 0x3)
+	{
+		case 0: one_integer = four_integers.x; break;
+		case 1: one_integer = four_integers.y; break;
+		case 2: one_integer = four_integers.z; break;
+		case 3: one_integer = four_integers.w; break;
+	}
+
+	return one_integer;
 }
 
-__device__ uint32_t bwt_rbwt_bwt(bwtint_t k,char strand)
-// This function uses joint texture for bwt/rbst
+
+
+__device__ uint32_t _rbwt_bwt2(bwtint_t k)
 {
     //int pos = (k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL) / 16;
-    uint32_t pos = (k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL >> 4);
-    //uint one_integer = tex2D(bwt_rbwt_occ_array,pos>>16,pos & 0xFFFF);
-    uint one_integer = BWT_RBWT_OCC1(bwt_rbwt_offset[strand]+pos);
+    int pos = (k)/OCC_INTERVAL*12 + 4 + ((k)%OCC_INTERVAL >> 4);
+    uint4 four_integers = tex1Dfetch(rbwt_occ_array,pos>>2);
+    uint32_t one_integer;
+
+    switch (pos & 0x3)
+    {
+        case 0: one_integer = four_integers.x; break;
+        case 1: one_integer = four_integers.y; break;
+        case 2: one_integer = four_integers.z; break;
+        case 3: one_integer = four_integers.w; break;
+    }
 
     return one_integer;
 }
 
-__device__ ubyte_t bwt_rbwt_B0(bwtint_t k,char strand)
+
+
+// This function does not work because the pointer b->bwt is not set.
+__device__ ubyte_t _bwt_B0(const bwt_t *b, bwtint_t k)
 {
-	uint32_t tmp = bwt_rbwt_bwt(k,strand)>>((~(k)&0xf)<<1)&3;
+	uint32_t tmp = _bwt_bwt(b,k)>>((~(k)&0xf)<<1)&3;
 	ubyte_t c = ubyte_t(tmp);
 	return c;
 }
 
-__device__ inline void Conv1DTo2D1(int *coord1_2D,int *coord2_2D,int coord_1D)
+
+
+__device__ ubyte_t _bwt_B02(bwtint_t k)
 {
-    *coord1_2D = (0xFFFF & coord_1D);
-    *coord2_2D = coord_1D >> 16;
+	uint32_t tmp = _bwt_bwt2(k)>>((~(k)&0xf)<<1)&3;
+	ubyte_t c = ubyte_t(tmp);
+	return c;
 }
 
-__device__ inline void Conv1DTo2D4(int *coord1_2D,int *coord2_2D,int coord_1D)
+
+
+__device__ ubyte_t _rbwt_B02(bwtint_t k)
 {
-    *coord1_2D = (0xFFFF & coord_1D)>>2;
-    *coord2_2D = coord_1D >> 16;
+    uint32_t tmp = _rbwt_bwt2(k)>>((~(k)&0xf)<<1)&3;
+    ubyte_t c = ubyte_t(tmp);
+    return c;
 }
+
+
+
+__device__ ubyte_t _bwt_B03(bwtint_t k, texture<uint4, 1, cudaReadModeElementType> *b)
+{
+	//uint32_t tmp = _bwt_bwt3(k,b)>>((~(k)&0xf)<<1)&3;
+	//ubyte_t c = ubyte_t(tmp);
+    //return c;
+    return ubyte_t(_bwt_bwt3(k,b)>>((~(k)&0xf)<<1)&3);
+}
+
+
+
+__device__ uint32_t* _bwt_occ_intv(const bwt_t *b, bwtint_t k)
+{
+	return ((b)->bwt + (k)/OCC_INTERVAL*12);
+}
+
+
+
+__device__
+int cuda_bwa_cal_maxdiff(int l, double err, double thres)
+{
+    double elambda = exp(-l * err);
+    double sum, y = 1.0;
+    int k, x = 1;
+    for (k = 1, sum = elambda; k < 1000; ++k) {
+        y *= l * err;
+        x *= k;
+        sum += elambda * y / x;
+        if (1.0 - sum < thres) return k;
+    }
+    return 2;
+}
+
+
 
 __device__
 int cuda_bwa_approx_mapQ(const bwa_maxdiff_mapQ_t *p, int mm)
@@ -4245,6 +4168,8 @@ int cuda_bwa_approx_mapQ(const bwa_maxdiff_mapQ_t *p, int mm)
     return (23 < g_log)? 0 : 23 - g_log;
 }
 
+
+
 __device__
 void update_indices(
     int *n_sa_processed,
@@ -4258,6 +4183,8 @@ void update_indices(
     (*n_sa_buf_empty)++;
 }
 
+
+
 __device__
 void update_indices_in_parallel(
     int *n_sa_processed,
@@ -4270,6 +4197,8 @@ void update_indices_in_parallel(
     atomicSub(*&n_sa_in_buf,1);
     atomicAdd(*&n_sa_buf_empty,1);
 }
+
+
 
 __device__
 void fetch_read_new_in_parallel(
@@ -4314,6 +4243,8 @@ void fetch_read_new_in_parallel(
     }
 }
 
+
+
 __device__
 void sort_reads(
     bwtint_t *sa_buf_arr,
@@ -4347,114 +4278,11 @@ void sort_reads(
     }
 }
 
-__device__
-uint32_t inline __occ_bwt_rbwt_cuda_aux4(
-		uint32_t b, char strand)
-// This function uses joint texture for bwt/rbwt
-{
-    uint32_t tmp = bwt_rbwt_cuda[strand].cnt_table[(b)&0xff];
-    tmp += bwt_rbwt_cuda[strand].cnt_table[(b)>>8&0xff];
-    tmp += bwt_rbwt_cuda[strand].cnt_table[(b)>>16&0xff];
-    tmp += bwt_rbwt_cuda[strand].cnt_table[(b)>>24];
-    return tmp;
-}
-
-__device__
-uint4 bwt_rbwt_cuda_occ4(
-		bwtint_t k,char strand)
-// return occurrence of c in bwt with k smallest suffix by reading it from texture memory
-// This function uses joint texture for bwt/rbwt
-{
-    // total number of character c in the up to the interval of k
-    uint4 tmp;
-    uint4 n = {0,0,0,0};
-    unsigned int i = 0;
-    unsigned int m = 0;
-    // remarks: uint4 in CUDA is 4 x integer ( a.x,a.y,a.z,a.w )
-    // uint4 is used because CUDA 1D texture array is limited to width for 2^27
-    // to access 2GB of memory, a structure uint4 is needed
-    // tmp variable
-    unsigned int tmp1,tmp2;//, tmp3;
-
-    if (k == bwt_rbwt_cuda[strand].seq_len)
-    {
-        n.x = bwt_rbwt_cuda[strand].L2[1]-bwt_rbwt_cuda[strand].L2[0];
-        n.y = bwt_rbwt_cuda[strand].L2[2]-bwt_rbwt_cuda[strand].L2[1];
-        n.z = bwt_rbwt_cuda[strand].L2[3]-bwt_rbwt_cuda[strand].L2[2];
-        n.w = bwt_rbwt_cuda[strand].L2[4]-bwt_rbwt_cuda[strand].L2[3];
-        return n;
-    }
-    if (k == (bwtint_t)(-1)) return n;
-    if (k >= bwt_rbwt_cuda[strand].primary) --k; // because $ is not in bwt
-
-    //tmp3 = k>>7;
-    //i = tmp3*3;
-    i = ((k>>7)*3);
-
-    // count the number of character c within the 128bits interval
-    tmp = BWT_RBWT_OCC4b(i+1,strand);
-
-    if (k&0x40)
-    {
-        m = __occ_bwt_rbwt_cuda_aux4(tmp.x,strand);
-        m += __occ_bwt_rbwt_cuda_aux4(tmp.y,strand);
-        m += __occ_bwt_rbwt_cuda_aux4(tmp.z,strand);
-        m += __occ_bwt_rbwt_cuda_aux4(tmp.w,strand);
-        tmp = BWT_RBWT_OCC4b(i+2,strand);
-    }
-    if (k&0x20)
-    {
-        m += __occ_bwt_rbwt_cuda_aux4(tmp.x,strand);
-        m += __occ_bwt_rbwt_cuda_aux4(tmp.y,strand);
-        tmp1=tmp.z;
-        tmp2=tmp.w;
-    } else {
-        tmp1=tmp.x;
-        tmp2=tmp.y;
-    }
-    if (k&0x10)
-    {
-        m += __occ_bwt_rbwt_cuda_aux4(tmp1,strand);
-        tmp1=tmp2;
-    }
-    // just shift away the unwanted character, no need to shift back
-    // number of c in tmp1 will still be correct
-    m += __occ_bwt_rbwt_cuda_aux4(tmp1>>(((~k)&15)<<1),strand);
-    n.x = m&0xff; n.y = m>>8&0xff; n.z = m>>16&0xff; n.w = m>>24;
-
-    // retrieve the total count from index the number of character C in the up k/128bits interval
-    tmp = BWT_RBWT_OCC4b(i,strand);
-    n.x += tmp.x; n.x -= ~k&15; n.y += tmp.y; n.z += tmp.z; n.w += tmp.w;
-
-    return n;
-}
-
-__device__
-bwtint_t bwt_rbwt_cuda_occ(
-		bwtint_t k, ubyte_t c, char strand)
-// return occurrence of c in bwt with k smallest suffix by reading it from texture memory
-// This function uses joint texture for bwt/rbwt
-{
-    uint4 ok = bwt_rbwt_cuda_occ4(k,strand);
-    switch ( c )
-    {
-    case 0:
-        return ok.x;
-    case 1:
-        return ok.y;
-    case 2:
-        return ok.z;
-    case 3:
-        return ok.w;
-    }
-    return 0;
-}
-
 // This function can process a maximum of 2**15 reads per block.
 // bwt_sa() with texture reads (alignment 1).
 // BWT and RBWT are separated by order (run in succession).
 __global__
-void cuda_bwa_cal_pac_pos_parallel1(
+void cuda_bwa_cal_pac_pos_parallel2(
     uint8_t *seqs_mapQ_de,
     bwtint_t *seqs_pos_de,
     const bwa_maxdiff_mapQ_t *seqs_maxdiff_mapQ_de,
@@ -4464,15 +4292,16 @@ void cuda_bwa_cal_pac_pos_parallel1(
     int n_seq_per_block,
     int block_mod,
     int max_mm,
-    float fnr,
-    int bwt_sa_intv,
-    int rbwt_sa_intv)
+    float fnr)
 {
     // Declare and initialize variables.
     // Thread ID and offset.
     const int tid = threadIdx.x;
-    const int bid = blockIdx.x / 2; //blockIdx.x < n_block/2 ? blockIdx.x : blockIdx.x/2;
-    const int n_sa_total = n_seq_per_block + (blockIdx.x < 2*block_mod ? 1 : 0);
+    const int offset = blockIdx.x < block_mod ? (n_seq_per_block+1)*blockIdx.x : (n_seq_per_block+1)*block_mod + n_seq_per_block*(blockIdx.x-block_mod);
+    const int n_sa_total = n_seq_per_block + (blockIdx.x < block_mod ? 1 : 0);
+
+    int bwt_sa_intv = bwt_cuda.sa_intv;
+    int rbwt_sa_intv = rbwt_cuda.sa_intv;
 
     __shared__ int n_sa_processed;
     __shared__ int n_sa_remaining;
@@ -4480,10 +4309,6 @@ void cuda_bwa_cal_pac_pos_parallel1(
     __shared__ int n_sa_in_buf_prev;
     __shared__ int n_sa_buf_empty;
     __shared__ int sa_next_no;
-    __shared__ char block_strand;
-    __shared__ int offset;
-    __shared__ int block_sa_intv;
-    //__shared__ int
 
     __shared__ bwtint_t sa_buf_arr[BLOCK_SIZE2];    // Array of "sa".
     __shared__ bwa_maxdiff_mapQ_t maxdiff_mapQ_buf_arr[BLOCK_SIZE2];    // Array of "maxdiff" elements.
@@ -4496,31 +4321,16 @@ void cuda_bwa_cal_pac_pos_parallel1(
     // BUFFER_SIZE2 = n_sa_in_buf + n_sa_buf_empty". "sa_next_no" (< "n_total") is the number of the read
     // to fetch next from global or texture memory.
 
-    // "block_strand" is the strand of the block.
-
-    // Blocks come in pairs. Blocks 0 and 1 do the same first no. of reads given by "n_sa_total".
-    // But strand 0 does the forward strand and 1 the reverse strand, so there is no duplicity of
-    // effort.
-
-
-    ////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Run BWT.
-    ////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    // Which strand to use.
-    block_strand = blockIdx.x & 0x1;
-    block_sa_intv = block_strand ? bwt_sa_intv : rbwt_sa_intv ;
-
-    __syncthreads();
-
-    offset = bid < block_mod ? (n_seq_per_block+1)*bid : (n_seq_per_block+1)*block_mod + n_seq_per_block*(bid-block_mod);
     n_sa_processed = 0;
     n_sa_remaining = n_sa_total;
     n_sa_in_buf = min(n_sa_total,BLOCK_SIZE2);
     n_sa_in_buf_prev = n_sa_in_buf;
     n_sa_buf_empty = BLOCK_SIZE2 - n_sa_in_buf;
     sa_next_no = n_sa_in_buf;
-
 
     __syncthreads();
 
@@ -4538,10 +4348,9 @@ void cuda_bwa_cal_pac_pos_parallel1(
     // Initialize the return values
     sa_return[tid] = 0;
 
-    // Get new reads.
+    // Get new reads on the right strand.
     if (tid < n_sa_in_buf &&
-        !(maxdiff_mapQ_buf_arr[tid].strand == block_strand
-        && (maxdiff_mapQ_buf_arr[tid].type == BWA_TYPE_UNIQUE ||
+        !(maxdiff_mapQ_buf_arr[tid].strand && (maxdiff_mapQ_buf_arr[tid].type == BWA_TYPE_UNIQUE ||
         maxdiff_mapQ_buf_arr[tid].type == BWA_TYPE_REPEAT)))
     {
         update_indices_in_parallel(&n_sa_processed,&n_sa_remaining,&n_sa_in_buf,&n_sa_buf_empty);
@@ -4558,7 +4367,7 @@ void cuda_bwa_cal_pac_pos_parallel1(
             &n_sa_remaining,
             &sa_next_no,
             n_sa_total,
-            block_strand);
+            1);
 
         if (sa_origin[tid] != -1)
         {
@@ -4592,8 +4401,8 @@ void cuda_bwa_cal_pac_pos_parallel1(
            (tid < n_sa_in_buf)
         {
             char continuation = 1;
-            if (sa_buf_arr[tid] % block_sa_intv == 0) {continuation = 0;}
-            else if (sa_buf_arr[tid] == bwt_rbwt_cuda[block_strand].primary)
+            if (sa_buf_arr[tid] % bwt_sa_intv == 0) {continuation = 0;}
+            else if (sa_buf_arr[tid] == bwt_cuda.primary)
             {
                 sa_return[tid]++;
                 sa_buf_arr[tid] = 0;
@@ -4602,21 +4411,11 @@ void cuda_bwa_cal_pac_pos_parallel1(
 
             if (!continuation)
             {
-                int max_diff = bwa_cuda_cal_maxdiff(maxdiff_mapQ_buf_arr[tid].len,BWA_AVG_ERR,fnr);
+                int max_diff = cuda_bwa_cal_maxdiff(maxdiff_mapQ_buf_arr[tid].len,BWA_AVG_ERR,fnr);
                 uint8_t mapQ = cuda_bwa_approx_mapQ(&maxdiff_mapQ_buf_arr[tid],max_diff);
-                bwtint_t pos =
-                    sa_return[tid] +
-                    tex1Dfetch(bwt_rbwt_sa_tex,bwt_rbwt_sa_offset[block_strand]+sa_buf_arr[tid]/block_sa_intv);
-
-                // If on the reverse strand.
-                if (!block_strand)
-                {
-                    pos = bwt_rbwt_cuda[!block_strand].seq_len - (pos + maxdiff_mapQ_buf_arr[tid].len);
-                }
 
                 // Return read that is finished.
-                seqs_pos_de[offset+sa_origin[tid]] = pos;
-
+                seqs_pos_de[offset+sa_origin[tid]] = sa_return[tid] + tex1Dfetch(bwt_sa_tex,sa_buf_arr[tid]/bwt_sa_intv);
                 // Return "mapQ".
                 seqs_mapQ_de[offset+sa_origin[tid]] = mapQ;
                 sa_origin[tid] = -1;
@@ -4636,7 +4435,7 @@ void cuda_bwa_cal_pac_pos_parallel1(
                     &n_sa_remaining,
                     &sa_next_no,
                     n_sa_total,
-                    block_strand);
+                    1);
 
                 if (sa_origin[tid] != -1)
                 {
@@ -4648,8 +4447,6 @@ void cuda_bwa_cal_pac_pos_parallel1(
         }
 
         __syncthreads();
-
-        //break;
 
         if (n_sa_remaining <= 0) break;
 
@@ -4672,74 +4469,201 @@ void cuda_bwa_cal_pac_pos_parallel1(
 
         sa_return[tid]++;
 
-        if //(sa_origin[tid] != -1)
-        (tid < n_sa_in_buf)
+        if (tid < n_sa_in_buf)
         {
-            ////////////////////////////////////////////////////////////
+            ///////////////////////////////////////////////////////////////////////////////////////////////////////////
             // Start bwt_sa (bwtint_t bwt_sa(const bwt_t *bwt, bwtint_t k))
-            ////////////////////////////////////////////////////////////
+            ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-            ////////////////////////////////////////////////////////////
+            ///////////////////////////////////////////////////////////////////////////////////////////////////////////
             // Start #define bwt_invPsi(bwt, k)
-            ////////////////////////////////////////////////////////////
+            ///////////////////////////////////////////////////////////////////////////////////////////////////////////
             // First conditional expression.
             // Moved to the section above where "else if (sa_arr[k] == bwt_cuda.primary)".
 
             // Second conditional expression.
-            bwtint_t invPsi1 = sa_buf_arr[tid] < bwt_rbwt_cuda[block_strand].primary ? sa_buf_arr[tid] : sa_buf_arr[tid]-1;
-            ubyte_t invPsi2 = bwt_rbwt_B0(invPsi1,block_strand);
-            invPsi1 = bwt_rbwt_cuda_occ(sa_buf_arr[tid],invPsi2,block_strand);
-            sa_buf_arr[tid] = bwt_rbwt_cuda[block_strand].L2[invPsi2]+invPsi1;
+            bwtint_t invPsi1 = sa_buf_arr[tid] < bwt_cuda.primary ? sa_buf_arr[tid] : sa_buf_arr[tid]-1;
+            ubyte_t invPsi2 = _bwt_B02(invPsi1);
+            invPsi1 = bwt_cuda_occ(sa_buf_arr[tid],invPsi2);
+            sa_buf_arr[tid] = bwt_cuda.L2[invPsi2]+invPsi1;
+        }
+    }
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // Run RBWT.
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+    //seqs_pos_de[offset+sa_origin[tid]] = bwt_cuda.seq_len - (maxdiff_mapQ_buf_arr[tid].len +
+    //    sa_return[tid] + tex1Dfetch(rbwt_sa_tex,sa_buf_arr[tid]/rbwt_sa_intv));
+    __syncthreads();
+
+    n_sa_processed = 0;
+    n_sa_remaining = n_sa_total;
+    n_sa_in_buf = min(n_sa_total,BLOCK_SIZE2);
+    n_sa_in_buf_prev = n_sa_in_buf;
+    n_sa_buf_empty = BLOCK_SIZE2 - n_sa_in_buf;
+    sa_next_no = n_sa_in_buf;
+
+    __syncthreads();
+
+    // Fill arrays with initial values. (Do this first to reduce latency as reading from global
+    // memory is time-consuming).
+    if (tid < n_sa_in_buf)
+    {
+        maxdiff_mapQ_buf_arr[tid] = seqs_maxdiff_mapQ_de[offset+tid];
+        sa_buf_arr[tid] = seqs_sa_de[offset+tid];
+    }
+
+    // Set the position in the return array.
+    sa_origin[tid] = tid < n_sa_in_buf ? tid : -1;
+
+    // Initialize the return values.
+    sa_return[tid] = 0;
+
+    // Get new reads on the right strand.
+    if (tid < n_sa_in_buf &&
+        !(!maxdiff_mapQ_buf_arr[tid].strand && (maxdiff_mapQ_buf_arr[tid].type == BWA_TYPE_UNIQUE ||
+        maxdiff_mapQ_buf_arr[tid].type == BWA_TYPE_REPEAT)))
+    {
+        update_indices_in_parallel(&n_sa_processed,&n_sa_remaining,&n_sa_in_buf,&n_sa_buf_empty);
+        sa_origin[tid] = -1;
+
+        fetch_read_new_in_parallel(
+            &maxdiff_mapQ_buf_arr[tid],
+            &sa_origin[tid],
+            seqs_maxdiff_mapQ_de,
+            offset,
+            &n_sa_in_buf,
+            &n_sa_buf_empty,
+            &n_sa_processed,
+            &n_sa_remaining,
+            &sa_next_no,
+            n_sa_total,
+            0);
+
+        if (sa_origin[tid] != -1)
+        {
+            sa_buf_arr[tid] = seqs_sa_de[offset+sa_origin[tid]];
+            sa_return[tid] = 0;
+        }
+    }
+
+    // Sort reads.
+    __syncthreads();
+
+    if (tid == 0)
+    {
+        sort_reads(
+            &sa_buf_arr[0],
+            &maxdiff_mapQ_buf_arr[0],
+            &sa_origin[0],
+            &sa_return[0],
+            &n_sa_in_buf,
+            &n_sa_in_buf_prev);
+    }
+
+    __syncthreads();
+
+    // Start bwt_sa() in a loop until all reads have been processed.
+    while (true)
+    {
+        // Return finished reads, fetch new reads if possible. Run in parallel, not sequentially.
+        if //(sa_origin[tid] != -1)
+           (tid < n_sa_in_buf)
+        {
+            char continuation = 1;
+            if (sa_buf_arr[tid] % rbwt_sa_intv == 0) {continuation = 0;}
+            else if (sa_buf_arr[tid] == rbwt_cuda.primary)
+            {
+                sa_return[tid]++;
+                sa_buf_arr[tid] = 0;
+                continuation = 0;
+            }
+
+            if (!continuation)
+            {
+                int max_diff = cuda_bwa_cal_maxdiff(maxdiff_mapQ_buf_arr[tid].len,BWA_AVG_ERR,fnr);
+                uint8_t mapQ = cuda_bwa_approx_mapQ(&maxdiff_mapQ_buf_arr[tid],max_diff);
+
+                // Return read that is finished.
+                //seqs_pos_de[offset+sa_origin[tid]] = sa_return[tid] + tex1Dfetch(bwt_sa_tex,sa_buf_arr[tid]/bwt_sa_intv);
+                seqs_pos_de[offset+sa_origin[tid]] = bwt_cuda.seq_len - (maxdiff_mapQ_buf_arr[tid].len +
+                    sa_return[tid] + tex1Dfetch(rbwt_sa_tex,sa_buf_arr[tid]/rbwt_sa_intv));
+                // Return "mapQ".
+                seqs_mapQ_de[offset+sa_origin[tid]] = mapQ;
+                sa_origin[tid] = -1;
+
+                // Update indices.
+                update_indices_in_parallel(&n_sa_processed,&n_sa_remaining,&n_sa_in_buf,&n_sa_buf_empty);
+
+                // Get new read.
+                fetch_read_new_in_parallel(
+                    &maxdiff_mapQ_buf_arr[tid],
+                    &sa_origin[tid],
+                    seqs_maxdiff_mapQ_de,
+                    offset,
+                    &n_sa_in_buf,
+                    &n_sa_buf_empty,
+                    &n_sa_processed,
+                    &n_sa_remaining,
+                    &sa_next_no,
+                    n_sa_total,
+                    0);
+
+                if (sa_origin[tid] != -1)
+                {
+                    sa_buf_arr[tid] = seqs_sa_de[offset+sa_origin[tid]];
+                    sa_return[tid] = 0;
+                }
+            }
+        }
+
+        __syncthreads();
+
+        if (n_sa_remaining <= 0) break;
+
+        // This section puts reads in the buffer first to allow full warps to be run.
+        if (n_sa_in_buf < BLOCK_SIZE2)
+        {
+            if (tid == 0)
+            {
+                sort_reads(
+                    &sa_buf_arr[0],
+                    &maxdiff_mapQ_buf_arr[0],
+                    &sa_origin[0],
+                    &sa_return[0],
+                    &n_sa_in_buf,
+                    &n_sa_in_buf_prev);
+            }
+
+            __syncthreads();
+        }
+
+        sa_return[tid]++;
+
+        if (tid < n_sa_in_buf)
+        {
+            ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+            // Start bwt_sa (bwtint_t bwt_sa(const bwt_t *bwt, bwtint_t k))
+            ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+            ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+            // Start #define bwt_invPsi(bwt, k)
+            ///////////////////////////////////////////////////////////////////////////////////////////////////////////
+            // First conditional expression.
+            // Moved to the section above where "else if (sa_arr[k] == bwt_cuda.primary)".
+
+            // Second conditional expression.
+            bwtint_t invPsi1 = sa_buf_arr[tid] < rbwt_cuda.primary ? sa_buf_arr[tid] : sa_buf_arr[tid]-1;
+            ubyte_t invPsi2 = _rbwt_B02(invPsi1);
+            invPsi1 = rbwt_cuda_occ(sa_buf_arr[tid],invPsi2);
+            sa_buf_arr[tid] = rbwt_cuda.L2[invPsi2]+invPsi1;
         }
     }
 }
 
-// Calculate blocks for device. 2 blocks share the same reads; there is one block for each strand.
-void calc_n_block1(
-    int *n_sp_to_use,
-    int *n_block,
-    int *n_seq_per_block,
-    int *block_mod,
-    int n_mp_on_device,
-    int n_sp_per_mp,
-    int n_seqs)
-{
-	// No. of MPs on device.
-	n_sp_to_use[0] = n_mp_on_device*n_sp_per_mp;
-	// No. of blocks to use.
-	n_block[0] = n_sp_to_use[0];
-	// No of sequences per block.
-	n_seq_per_block[0] = n_seqs / n_block[0];
-	// Extra sequences to be shared amongst the first blocks.
-	block_mod[0] = n_seqs - n_seq_per_block[0] * n_block[0];
-	// No. of blocks in total; one for each strand.
-	n_block[0] += n_block[0];
-#if DEBUG_LEVEL > 1
-	fprintf(stderr, "n_sp_to_use: %i n_block: %i n_seq_per_block: %i block_mod: %i n_mp_on_device: %i n_sp_per_mp: %i n_seqs: %i\n", *n_sp_to_use, *n_block, *n_seq_per_block, *block_mod, n_mp_on_device, n_sp_per_mp, n_seqs);
-#endif
-	return;
-}
-
-void report_cuda_error_GPU(const char *message)
-{
-	cudaError_t cuda_err = cudaGetLastError();
-
-	if(cudaSuccess != cuda_err)
-	{
-		fprintf(stderr,"%s\n",message);
-		fprintf(stderr,"%s\n", cudaGetErrorString(cuda_err));
-		exit(1);
-	}
-}
-
-void report_cuda_error_CPU(const char * message)
-{
-	fprintf(stderr,"%s\n",message);
-	exit(1);
-}
 #endif
 ///////////////////////////////////////////////////////////////
-// End CUDA SAMSE core
+// End CUDA samse_core
 ///////////////////////////////////////////////////////////////
 
 

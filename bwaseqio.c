@@ -86,7 +86,7 @@ int bwa_read_seq_one_half_byte (bwa_seqio_t *bs, unsigned char * half_byte_array
 	if (((len = kseq_read(seq)) >= 0) && (len > mid)) // added to process only when len is longer than mid tag
 	{
 		//To cut the length of the sequence
-		if ( len > MAX_SEQUENCE_LENGTH) len = MAX_SEQUENCE_LENGTH;
+		if ( len > MAX_READ_LENGTH) len = MAX_READ_LENGTH;
 
 		mided_len = len - mid;
 
@@ -130,7 +130,7 @@ bwa_seq_t *bwa_read_seq(bwa_seqio_t *bs, unsigned int n_needed, unsigned int *n,
 	n_seqs = 0;
 	seqs = (bwa_seq_t*)calloc(n_needed, sizeof(bwa_seq_t));
 	while ((l = kseq_read(seq)) >= 0) {
-		if ( l > MAX_SEQUENCE_LENGTH ) l = MAX_SEQUENCE_LENGTH; //put a limit on sequence length
+		if ( l > MAX_READ_LENGTH ) l = MAX_READ_LENGTH; //put a limit on sequence length
 		p = &seqs[n_seqs++];
 		p->tid = -1; // no assigned to a thread
 		p->qual = 0;

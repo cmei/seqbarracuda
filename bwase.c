@@ -3,7 +3,7 @@
 
    Module: bwase.c  Read sequence reads from file, modified from BWA to support barracuda alignment functions
 
-   Copyright (C) 2010, University of Cambridge Metabolic Research Labs.
+   Copyright (C) 2012, University of Cambridge Metabolic Research Labs.
    Contributers: Dag Lyberg, Simon Lam and Brian Lam
 
    This program is free software; you can redistribute it and/or
@@ -37,16 +37,18 @@
 #include "utils.h"
 #include "kstring.h"
 
-// the read batch size, currently set at 262144
-#define BATCH_SIZE 0X40000
+// the read batch size, currently set at 524288
+#define BATCH_SIZE 0x80000
+
+char *bwa_rg_line, *bwa_rg_id;
 
 static int g_log_n[256];
 
+void bwa_print_sam_PG();
 
-
-void swap(bwt_aln1_t *x, bwt_aln1_t *y)
+void swap(barracuda_aln1_t *x, barracuda_aln1_t *y)
 {
-   bwt_aln1_t temp;
+   barracuda_aln1_t temp;
    temp = *x;
    *x = *y;
    *y = temp;
@@ -57,7 +59,7 @@ int choose_pivot(int i,int j)
    return((i+j) /2);
 }
 
-void aln_quicksort(bwt_aln1_t *aln, int m, int n)
+void aln_quicksort(barracuda_aln1_t *aln, int m, int n)
 //This function sorts the alignment array from barracuda to make it compatible with SAMSE/SAMPE cores
 {
 	int key,i,j,k;
@@ -86,9 +88,9 @@ void aln_quicksort(bwt_aln1_t *aln, int m, int n)
 	 }
 }
 
-void bwa_aln2seq(int n_aln, bwt_aln1_t *aln, bwa_seq_t *s)
+void bwa_aln2seq(int n_aln, barracuda_aln1_t *aln, bwa_seq_t *s)
 //This function is modified so that it would be compatible with barracuda raw output.
-//It is compatible original bwa output.
+//It is compatible with the original bwa output.
 {
 	int i, cnt, best;
 	if (n_aln == 0) {
@@ -106,7 +108,7 @@ void bwa_aln2seq(int n_aln, bwt_aln1_t *aln, bwa_seq_t *s)
 	best = aln[0].score;
 
 	for (i = cnt = 0; i < n_aln; ++i) {
-		const bwt_aln1_t *p = aln + i;
+		const barracuda_aln1_t *p = aln + i;
 		if (p->score > best) break;
 		if (drand48() * (p->l - p->k + 1) > (double)cnt) {
 			s->n_mm = p->n_mm; s->n_gapo = p->n_gapo; s->n_gape = p->n_gape; s->strand = p->a;
@@ -122,7 +124,7 @@ void bwa_aln2seq(int n_aln, bwt_aln1_t *aln, bwa_seq_t *s)
 }
 //Original
 /*
-void bwa_aln2seq(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s)
+void bwa_aln2seq(int n_aln, const barracuda_aln1_t *aln, bwa_seq_t *s)
 {
 	int i, cnt, best;
 	if (n_aln == 0) {
@@ -132,7 +134,7 @@ void bwa_aln2seq(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s)
 	}
 	best = aln[0].score;
 	for (i = cnt = 0; i < n_aln; ++i) {
-		const bwt_aln1_t *p = aln + i;
+		const barracuda_aln1_t *p = aln + i;
 		if (p->score > best) break;
 		if (drand48() * (p->l - p->k + 1) > (double)cnt) {
 			s->n_mm = p->n_mm; s->n_gapo = p->n_gapo; s->n_gape = p->n_gape; s->strand = p->a;
@@ -432,6 +434,8 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 			printf("%s", p->qual);
 		} else printf("*");
 
+		if (bwa_rg_id) printf("\tRG:Z:%s", bwa_rg_id);
+
 		if (p->type != BWA_TYPE_NO_MATCH) {
 			// calculate XT tag
 			XT = "NURM"[p->type];
@@ -457,6 +461,7 @@ void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, in
 			if (p->strand) seq_reverse(p->len, p->qual, 0); // reverse quality
 			printf("%s", p->qual);
 		} else printf("*");
+		if (bwa_rg_id) printf("\tRG:Z:%s", bwa_rg_id);
 		putchar('\n');
 	}
 }
@@ -481,34 +486,69 @@ double diff_in_seconds(struct timeval *finishtime, struct timeval * starttime)
 }
 
 //print header
+
 void bwa_print_sam_SQ(const bntseq_t *bns)
 {
 	int i;
 	for (i = 0; i < bns->n_seqs; ++i)
 		printf("@SQ\tSN:%s\tLN:%d\n", bns->anns[i].name, bns->anns[i].len);
+	if (bwa_rg_line) printf("%s\n", bwa_rg_line);
 }
 
+char *bwa_escape(char *s)
+{
+	char *p, *q;
+	for (p = q = s; *p; ++p) {
+		if (*p == '\\') {
+			++p;
+			if (*p == 't') *q++ = '\t';
+			else if (*p == 'n') *q++ = '\n';
+			else if (*p == 'r') *q++ = '\r';
+			else if (*p == '\\') *q++ = '\\';
+		} else *q++ = *p;
+	}
+	*q = '\0';
+	return s;
+}
 
+int bwa_set_rg(const char *s)
+{
+	char *p, *q, *r;
+	if (strstr(s, "@RG") != s) return -1;
+	if (bwa_rg_line) free(bwa_rg_line);
+	if (bwa_rg_id) free(bwa_rg_id);
+	bwa_rg_line = strdup(s);
+	bwa_rg_id = 0;
+	bwa_escape(bwa_rg_line);
+	p = strstr(bwa_rg_line, "\tID:");
+	if (p == 0) return -1;
+	p += 4;
+	for (q = p; *q && *q != '\t' && *q != '\n'; ++q);
+	bwa_rg_id = calloc(q - p + 1, 1);
+	for (q = p, r = bwa_rg_id; *q && *q != '\t' && *q != '\n'; ++q)
+		*r++ = *q;
+	return 0;
+}
 
 void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_fa, const int useCPU, int device)
 //This is modified to load both the bwt & rbwt into memory here rather than in bwa_cal_pac_pos
 //Adv is this reduces disk I/O (much faster)
-//TODO: will be ported to CUDA in next version
 {
 
 
 	int i, n_seqs, tot_seqs = 0, m_aln;
-	bwt_aln1_t *aln = 0;
+	barracuda_aln1_t *aln = 0;
 	bwa_seq_t *seqs;
 	bwa_seqio_t *ks;
 	//clock_t t;
 	bntseq_t *bns, *ntbns = 0;
 	FILE *fp_sa;
-	gap_opt_t opt;
+	barracuda_gap_opt_t opt;
 
 	// For timing purpose only
 	struct timeval start, end;
 	double time_used;
+	gettimeofday (&start, NULL);
 	// initialization
 	for (i = 1; i != 256; ++i) g_log_n[i] = (int)(4.343 * log(i) + 0.5);
 	bns = bns_restore(prefix);
@@ -519,8 +559,7 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 	char str[1024];
 	bwt_t *bwt, *rbwt;
 
-	if(useCPU)
-	{	// open bwts added by brian
+		// open bwts added by brian
 		fprintf(stderr,"[samse_core] Loading BWTs, please wait..");
 		// load forward & reverse SA
 		gettimeofday (&start, NULL);
@@ -535,53 +574,82 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 
 		fprintf(stderr, "Done! \n[samse_core] Time used: %0.2fs\n", time_used);
 
-	}
-
 
 	// core loop
 	m_aln = 0;
-	fread(&opt, sizeof(gap_opt_t), 1, fp_sa);
+	fread(&opt, sizeof(barracuda_gap_opt_t), 1, fp_sa);
 	if (!(opt.mode & BWA_MODE_COMPREAD)) // in color space; initialize ntpac
 		ntbns = bwa_open_nt(prefix);
+
 	if (opt.mid > 0) fprintf(stderr,"[samse_core] Option (-s %d) used for alignment, dropping the first %d bases from 5' ends.\n", opt.mid, opt.mid);
 
 	bwa_print_sam_SQ(bns); //print header - new from bwa 0.5.7
+	bwa_print_sam_PG();
 
-	int selectedDevice = -1;
+    // bwt occurrence array in GPU
+    unsigned int *global_bwt = 0;
+    // rbwt occurrence array in GPU
+    unsigned int *global_rbwt = 0;
+    bwtint_t *bwt_sa_de = 0;
+    bwtint_t *rbwt_sa_de = 0;
+    int *g_log_n_de;
+    const int g_log_n_len = 256;
+    int n_seqs_max = 0;
 
-	//If GPU is selected,
-	if(!useCPU)
-	{
-		fprintf(stderr,"[samse_core] Running CUDA mode.\n");
+    if(!useCPU)
+    {
+    	fprintf(stderr,"[samse_core] Running CUDA Mode\n");
 
-		///////////////////////////////////////////////////////////
-	    // Prepare cuda_bwa_cal_pac_pos()
-	    ///////////////////////////////////////////////////////////
+		int num_devices;
+		cudaGetDeviceCount(&num_devices);
 
-	    //int *g_log_n_de;
-	    const int g_log_n_len = 256;
-	    const int n_seqs_max = BATCH_SIZE;
+		if (!num_devices)
+		{
+			fprintf(stderr,"[samse_core] Cannot find a suitable CUDA device! aborting!\n");
+			return;
+		}
 
-	    selectedDevice = prepare_bwa_cal_pac_pos_cuda(
-	        prefix,
-	        &g_log_n,
-	        g_log_n_len,
-	        n_seqs_max,
-	        device);
+    	if (device < 0)
+    	{
+    		device =  detect_cuda_device();
+    	}else
+    	{
+    		fprintf(stderr,"[samse_core] Using specified CUDA device %d.\n",device);
+    	}
 
-	    if(selectedDevice < 0)
-	    {
-	    	return;
-	    }
 
-		fprintf(stderr,"[samse_core] Refining alignments onto reference assembly, please wait..\n[samse_core] ");
+        int success = prepare_bwa_cal_pac_pos_cuda1(
+            &global_bwt,
+            &global_rbwt,
+            prefix,
+            &bwt_sa_de,
+            &rbwt_sa_de,
+            bwt,
+            rbwt,
+            &g_log_n,
+            &g_log_n_de,
+            g_log_n_len,
+            device);
 
-	}else{
-		fprintf(stderr,"[samse_core] Running CPU mode.\n");
-		fprintf(stderr,"[samse_core] Refining alignments onto reference assembly, please wait..\n[samse_core] ");
-	}
+        if (!success) return;
 
-	gettimeofday (&start, NULL);
+        n_seqs_max = BATCH_SIZE;
+
+        prepare_bwa_cal_pac_pos_cuda2(n_seqs_max);
+
+    	//fprintf(stderr,"[samse_debug] Freeing memory\n");
+		bwt_destroy(bwt);
+		bwt_destroy(rbwt);
+
+    }else
+    {
+    	fprintf(stderr,"[samse_core] Running CPU Mode\n");
+        n_seqs_max = 0x40000;
+    }
+
+	fprintf(stderr,"[samse_core] Mapping SA coordinates to linear space, please wait... \n");
+    fprintf(stderr,"[samse_core] Processing %u sequences at a time.\n[samse_core] ", n_seqs_max);
+
 
 	while ((seqs = bwa_read_seq(ks, BATCH_SIZE, &n_seqs, (opt.mode & BWA_MODE_COMPREAD), opt.mid)) != 0) {
 		tot_seqs += n_seqs;
@@ -594,36 +662,27 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 			fread(&n_aln, 4, 1, fp_sa);
 			if (n_aln > m_aln) {
 				m_aln = n_aln;
-				aln = (bwt_aln1_t*)realloc(aln, sizeof(bwt_aln1_t) * m_aln);
+				aln = (barracuda_aln1_t*)realloc(aln, sizeof(barracuda_aln1_t) * m_aln);
 			}
-			fread(aln, sizeof(bwt_aln1_t), n_aln, fp_sa);
+			fread(aln, sizeof(barracuda_aln1_t), n_aln, fp_sa);
 			bwa_aln2seq(n_aln, aln, p);
 		}
 
-		if(useCPU)
+		if (useCPU)
 		{
-			//fprintf(stderr, "[bwa_samse_core] convert to sequence coordinate... ");
 			bwa_cal_pac_pos(prefix, n_seqs, seqs, opt.max_diff, opt.fnr, bwt, rbwt); // forward bwt will be destroyed here
-			fprintf(stderr,"c");
-		}
-		else
+			fprintf(stderr,".");
+		}else if(!useCPU)
 		{
-			///////////////////////////////////////////////////////////////
-			// Begin bwa_cal_pac_pos_cuda
-			///////////////////////////////////////////////////////////////
-
 			launch_bwa_cal_pac_pos_cuda(
 			    prefix,
 			    n_seqs,
 			    seqs,
 			    opt.max_diff,
 			    opt.fnr,
-			    selectedDevice);
+			    device);
 
 			fprintf(stderr,".");
-			///////////////////////////////////////////////////////////////
-			// End bwa_cal_pac_pos_cuda
-			///////////////////////////////////////////////////////////////
 		}
 
 		//fprintf(stderr, "[bwa_samse_core] refine gapped alignments... ");
@@ -638,14 +697,21 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 
 		bwa_free_read_seq(n_seqs, seqs);
 	}
+
 	if(!useCPU)
 	{
-		free_bwa_cal_pac_pos_cuda();
+		free_bwa_cal_pac_pos_cuda1(global_bwt,global_rbwt,bwt_sa_de,rbwt_sa_de,g_log_n_de);
+		free_bwa_cal_pac_pos_cuda2();
+
 	}
+
+    ///////////////////////////////////////////////////////////
+    // End: finish cuda_bwa_cal_pac_pos()
+    ///////////////////////////////////////////////////////////
 	gettimeofday (&end, NULL);
 	time_used = diff_in_seconds(&end,&start);
 
-	fprintf(stderr, "\n[samse_core] Done!\n[samse_core] Total no. of sequences: %d\n[samse_core] Time used: %0.2fs (%0.2f sequences/sec)\n", tot_seqs, time_used, (float) tot_seqs/time_used);
+	fprintf(stderr, "\n[samse_core] Done!\n[samse_core] Total no. of sequences: %d\n[samse_core] Total program time: %0.2fs (%0.2f sequences/sec)\n", tot_seqs, time_used, (float) tot_seqs/time_used);
 
 	// destroy
 	bwa_seq_close(ks);
@@ -661,7 +727,7 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 	free(aln);
 }
 
-static void print_aln_simple(bwt_t *const bwt[2], const bntseq_t *bns, const bwt_aln1_t *q, int len, bwtint_t k)
+static void print_aln_simple(bwt_t *const bwt[2], const bntseq_t *bns, const barracuda_aln1_t *q, int len, bwtint_t k)
 {
 	bwtint_t pos;
 	int seqid, is_N;
@@ -675,12 +741,12 @@ static void print_aln_simple(bwt_t *const bwt[2], const bntseq_t *bns, const bwt
 void bwa_print_all_hits(const char *prefix, const char *fn_sa, const char *fn_fa, int max_occ)
 {
 	int i, n_seqs, tot_seqs = 0, m_aln;
-	bwt_aln1_t *aln = 0;
+	barracuda_aln1_t *aln = 0;
 	bwa_seq_t *seqs;
 	bwa_seqio_t *ks;
 	bntseq_t *bns;
 	FILE *fp_sa;
-	gap_opt_t opt;
+	barracuda_gap_opt_t opt;
 	bwt_t *bwt[2];
 
 	bns = bns_restore(prefix);
@@ -688,7 +754,7 @@ void bwa_print_all_hits(const char *prefix, const char *fn_sa, const char *fn_fa
 	ks = bwa_seq_open(fn_fa);
 	fp_sa = xopen(fn_sa, "r");
 
-	fprintf(stderr,"[samse_core] Refining alignments onto reference assembly, please wait..\n");
+	fprintf(stderr,"[samse_core] Now coverting SA coordinates to linear space, please wait..\n");
 
 	{ // load BWT
 		char *str = (char*)calloc(strlen(prefix) + 10, 1);
@@ -699,9 +765,8 @@ void bwa_print_all_hits(const char *prefix, const char *fn_sa, const char *fn_fa
 		free(str);
 	}
 
-
 	m_aln = 0;
-	fread(&opt, sizeof(gap_opt_t), 1, fp_sa);
+	fread(&opt, sizeof(barracuda_gap_opt_t), 1, fp_sa);
 	while ((seqs = bwa_read_seq(ks, 0x40000, &n_seqs, opt.mode & BWA_MODE_COMPREAD, opt.mid)) != 0) {
 		tot_seqs += n_seqs;
 		for (i = 0; i < n_seqs; ++i) {
@@ -711,17 +776,17 @@ void bwa_print_all_hits(const char *prefix, const char *fn_sa, const char *fn_fa
 			fread(&n_aln, 4, 1, fp_sa);
 			if (n_aln > m_aln) {
 				m_aln = n_aln;
-				aln = (bwt_aln1_t*)realloc(aln, sizeof(bwt_aln1_t) * m_aln);
+				aln = (barracuda_aln1_t*)realloc(aln, sizeof(barracuda_aln1_t) * m_aln);
 			}
-			fread(aln, sizeof(bwt_aln1_t), n_aln, fp_sa);
+			fread(aln, sizeof(barracuda_aln1_t), n_aln, fp_sa);
 			for (k = n_occ = 0; k < n_aln; ++k) {
-				const bwt_aln1_t *q = aln + k;
+				const barracuda_aln1_t *q = aln + k;
 				n_occ += q->l - q->k + 1;
 			}
 			rest = n_occ > max_occ? max_occ : n_occ;
 			printf(">%s %d %d\n", p->name, rest, n_occ);
 			for (k = 0; k < n_aln; ++k) {
-				const bwt_aln1_t *q = aln + k;
+				const barracuda_aln1_t *q = aln + k;
 				if (q->l - q->k + 1 <= rest) {
 					bwtint_t l;
 					for (l = q->k; l <= q->l; ++l)
@@ -755,13 +820,19 @@ int bwa_sai2sam_se(int argc, char *argv[])
 	fprintf(stderr, "Barracuda, Version %s\n", PACKAGE_VERSION);
 
 	int useCPU = 0, selectedDevice = -1;
-	int c, n_occ = 0;
-	while ((c = getopt(argc, argv, "htC:n:")) >= 0) {
+	int c = 0, n_occ = 1;
+	while ((c = getopt(argc, argv, "htC:n:r:")) >= 0) {
 		switch (c) {
 		case 'h': break;
 		case 't': useCPU = 1; break;
 		case 'C': selectedDevice = atoi(optarg); break;
 		case 'n': n_occ = atoi(optarg); break;
+		case 'r':
+					if (bwa_set_rg(optarg) < 0) {
+						fprintf(stderr, "[%s] ERROR!! malformated @RG line! Aborting...\n", __func__);
+						return 1;
+					}
+					break;
 		default: return 1;
 		}
 	}
@@ -772,19 +843,21 @@ int bwa_sai2sam_se(int argc, char *argv[])
 		fprintf(stderr, "Usage:\n          barracuda samse [options] <reference.fa> <reads.sai> <reads.fastq>\n");
 		fprintf(stderr, "\n");
 		fprintf(stderr, "Options: \n");
-		fprintf(stderr, "         -t 	   Run in CPU mode.\n");
+		fprintf(stderr, "         -t 	  Run in CPU mode. [default: CUDA mode]\n");
 		fprintf(stderr, "         -C NUM   Specify which CUDA device to use. [default: auto-detect] \n");
+		fprintf(stderr, "         -r STR   read group header line such as `@RG\\tID:foo\\tSM:bar' [null]\n");
 		fprintf(stderr, "         -n NUM   Maximum number of alignments to [non-SAM] output in the XA tag for single-end reads \n");
 		fprintf(stderr, "                  If a read has more than INT hits, the XA tag will not be included.\n");
-		fprintf(stderr, "                  [default: %d]\n\n", 3);
+		fprintf(stderr, "                  [default: %d]\n\n", 1);
 
 		return 1;
 	}
-	if (n_occ > 0) bwa_print_all_hits(argv[optind], argv[optind+1], argv[optind+2], n_occ);
+	if (n_occ > 1) bwa_print_all_hits(argv[optind], argv[optind+1], argv[optind+2], n_occ);
 	else
 	{
 		//fprintf(stderr,"selected device %d\n", selectedDevice);
 		bwa_sai2sam_se_core(argv[optind], argv[optind+1], argv[optind+2], useCPU, selectedDevice);
 	}
+	free(bwa_rg_line); free(bwa_rg_id);
 	return 0;
 }

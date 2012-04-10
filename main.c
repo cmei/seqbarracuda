@@ -28,8 +28,14 @@
 #include "main.h"
 
 #ifndef PACKAGE_VERSION
-#define PACKAGE_VERSION "0.6 beta"
+#define PACKAGE_VERSION "0.6.1 beta"
 #endif
+
+void bwa_print_sam_PG()
+{
+	printf("@PG\tID:barracuda\tPN:barracuda\tVN:%s\n", PACKAGE_VERSION);
+}
+
 
 static int usage()
 {
