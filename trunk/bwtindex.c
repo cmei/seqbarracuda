@@ -35,21 +35,35 @@
 #include "bwt.h"
 #include "main.h"
 #include "utils.h"
+#define PACKAGE_VERSION "0.6.1 beta"
 
 bwt_t *bwt_pac2bwt(const char *fn_pac, int use_is);
 void bwa_pac_rev_core(const char *fn, const char *fn_rev);
 
+
+long long pack_len_determine(const char *fn_pac)
+{
+	FILE *fp;
+	long long pac_len;
+	ubyte_t c;
+	fp = xopen(fn_pac, "rb");
+	fseek(fp, -1, SEEK_END);
+	pac_len = ftell(fp);
+	fread(&c, 1, 1, fp);
+	fclose(fp);
+	return (pac_len - 1) * 4 + (int)c;
+}
 int bwa_index(int argc, char *argv[])
 {
 	char *prefix = 0, *str, *str2, *str3;
-	int c, algo_type = 3, is_color = 0;
+	int c, algo_type = -1, is_color = 0;
 	clock_t t;
+	fprintf(stderr, "Barracuda, Version %s\n",PACKAGE_VERSION);
 
 	while ((c = getopt(argc, argv, "ca:p:")) >= 0) {
 		switch (c) {
 		case 'a':
-			if (strcmp(optarg, "div") == 0) algo_type = 1;
-			else if (strcmp(optarg, "bwtsw") == 0) algo_type = 2;
+			if (strcmp(optarg, "bwtsw") == 0) algo_type = 2;
 			else if (strcmp(optarg, "is") == 0) algo_type = 3;
 			else err_fatal(__func__, "unknown algorithm: '%s'.", optarg);
 			break;
@@ -60,14 +74,15 @@ int bwa_index(int argc, char *argv[])
 	}
 
 	if (optind + 1 > argc) {
+
 		fprintf(stderr, "\n");
-		fprintf(stderr, "Usage:   bwa index [-a bwtsw|div|is] [-c] <in.fasta>\n\n");
-		fprintf(stderr, "Options: -a STR    BWT construction algorithm: bwtsw or is [is]\n");
-		fprintf(stderr, "         -p STR    prefix of the index [same as fasta name]\n");
+		fprintf(stderr, "Usage:   barracuda index [-a bwtsw|is] [-c] <in.fasta>\n\n");
+		fprintf(stderr, "Options: -a STR    BWT construction algorithm: bwtsw/is  Default: [auto-detect based on size]\n");
+		fprintf(stderr, "         -p STR    prefix of the index  Default: [same as fasta name]\n");
 		fprintf(stderr, "         -c        build color-space index\n\n");
 		fprintf(stderr,	"Warning: `-a bwtsw' does not work for short genomes, while `-a is' and\n");
-		fprintf(stderr, "         `-a div' do not work not for long genomes (> 3GB). Please choose `-a'\n");
-		fprintf(stderr, "         according to the length of the genome.\n\n");
+		fprintf(stderr, "         `-a is' do not work not for long genomes (> 3GB). \n");
+
 		return 1;
 	}
 	if (prefix == 0) prefix = strdup(argv[optind]);
@@ -111,7 +126,24 @@ int bwa_index(int argc, char *argv[])
 		strcpy(str, prefix); strcat(str, ".pac");
 		strcpy(str2, prefix); strcat(str2, ".bwt");
 		t = clock();
+
+
 		fprintf(stderr, "[bwa_index] Construct BWT for the packed sequence...\n");
+
+		if (algo_type == -1)
+		{
+			long long length = pack_len_determine(str);
+		 	fprintf(stderr,"[bwa_index]   Choosing indexing algorithm automatically...\n");
+			fprintf(stderr,"[bwa_index]   Reference sequence size : %u MB\n", (unsigned int)(length/1000000));
+
+			if (length < 1500000000)
+			{
+				algo_type = 3;
+			}else
+			{
+				algo_type = 2;
+			}
+		}
 		if (algo_type == 2) bwt_bwtgen(str, str2);
 		else if (algo_type == 1 || algo_type == 3) {
 			bwt_t *bwt;
@@ -126,6 +158,8 @@ int bwa_index(int argc, char *argv[])
 		strcpy(str2, prefix); strcat(str2, ".rbwt");
 		t = clock();
 		fprintf(stderr, "[bwa_index] Construct BWT for the reverse packed sequence...\n");
+
+
 		if (algo_type == 2) bwt_bwtgen(str, str2);
 		else if (algo_type == 1 || algo_type == 3) {
 			bwt_t *bwt;

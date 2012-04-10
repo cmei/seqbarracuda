@@ -3,7 +3,7 @@
 
    Module: bwape.c  Read sequence reads from file, modified from BWA to support barracuda alignment functions
 
-   Copyright (C) 2010, Brian Lam and Simon Lam
+   Copyright (C) 2012, Brian Lam and Simon Lam
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -23,17 +23,7 @@
 
 */
 
-#include <unistd.h>
-#include <math.h>
-#include <stdlib.h>
-#include <time.h>
-#include <stdio.h>
-#include <string.h>
-#include "bwtaln.h"
-#include "kvec.h"
-#include "bntseq.h"
-#include "utils.h"
-#include "stdaln.h"
+#define PACKAGE_VERSION "0.6.1 beta"
 
 #include <unistd.h>
 #include <math.h>
@@ -46,6 +36,8 @@
 #include "bntseq.h"
 #include "utils.h"
 #include "stdaln.h"
+
+#define ENABLE_N_MULTI 0
 
 typedef struct {
 	int n;
@@ -53,9 +45,10 @@ typedef struct {
 } poslist_t;
 
 typedef struct {
-	double avg, std;
-	bwtint_t low, high;
+	double avg, std, ap_prior;
+	bwtint_t low, high, high_bayesian;
 } isize_info_t;
+
 
 #include "khash.h"
 KHASH_MAP_INIT_INT64(64, poslist_t)
@@ -66,7 +59,7 @@ KSORT_INIT_GENERIC(uint64_t)
 typedef struct {
 	kvec_t(uint64_t) arr;
 	kvec_t(uint64_t) pos[2];
-	kvec_t(bwt_aln1_t) aln[2];
+	kvec_t(barracuda_aln1_t) aln[2];
 } pe_data_t;
 
 #define MIN_HASH_WIDTH 1000
@@ -74,21 +67,165 @@ typedef struct {
 static int g_log_n[256];
 static kh_64_t *g_hash;
 
-void bwa_aln2seq(int n_aln, const bwt_aln1_t *aln, bwa_seq_t *s);
+
+void bwa_aln2seq(int n_aln, const barracuda_aln1_t *aln, bwa_seq_t *s);
 void bwa_refine_gapped(const bntseq_t *bns, int n_seqs, bwa_seq_t *seqs, ubyte_t *_pacseq, bntseq_t *ntbns);
 int bwa_approx_mapQ(const bwa_seq_t *p, int mm);
 void bwa_print_sam1(const bntseq_t *bns, bwa_seq_t *p, const bwa_seq_t *mate, int mode, int max_top2);
 bntseq_t *bwa_open_nt(const char *prefix);
 void bwa_print_sam_SQ(const bntseq_t *bns);
+void bwa_print_sam_PG();
+
+double diff_in_seconds_pe(struct timeval *finishtime, struct timeval * starttime)
+{
+	double sec;
+	sec=(finishtime->tv_sec-starttime->tv_sec);
+	sec+=(finishtime->tv_usec-starttime->tv_usec)/1000000.0;
+	return sec;
+}
+
+
+//TODO: These following 4 functions are temporary and should be integrated bwase
+#if ENABLE_N_MULTI == 1
+void pe_swap(barracuda_aln1_t *x, barracuda_aln1_t *y)
+{
+   barracuda_aln1_t temp;
+   temp = *x;
+   *x = *y;
+   *y = temp;
+}
+
+int pe_choose_pivot(int i,int j)
+{
+   return((i+j) /2);
+}
+
+
+void pe_quicksort(barracuda_aln1_t *aln, int m, int n)
+//This function sorts the alignment array from barracuda to make it compatible with SAMSE/SAMPE cores
+{
+	int key,i,j,k;
+
+	if (m < n)
+	{
+	      k = pe_choose_pivot(m, n);
+	      pe_swap(&aln[m],&aln[k]);
+	      key = aln[m].score;
+	      i = m+1;
+	      j = n;
+	      while(i <= j)
+	      {
+	         while((i <= n) && (aln[i].score <= key))
+	                i++;
+	         while((j >= m) && (aln[j].score > key))
+	                j--;
+	         if(i < j)
+	                pe_swap(&aln[i],&aln[j]);
+	      }
+	      // swap two elements
+	      pe_swap(&aln[m],&aln[j]);
+	      // recursively sort the lesser lists
+	      pe_quicksort(aln, m, j-1);
+	      pe_quicksort(aln, j+1, n);
+	 }
+}
+
+void bwa_aln2seq_core(int n_aln, barracuda_aln1_t *aln, bwa_seq_t *s, int set_main, int n_multi)
+{
+	int i, cnt, best;
+	if (n_aln == 0) {
+		s->type = BWA_TYPE_NO_MATCH;
+		s->c1 = s->c2 = 0;
+		return;
+	}
+
+	// add quicksort
+	if(n_aln > 1)
+	{
+		pe_quicksort(aln, 0, n_aln-1);
+	}
+
+	if (set_main) {
+		best = aln[0].score;
+		for (i = cnt = 0; i < n_aln; ++i) {
+			const barracuda_aln1_t *p = aln + i;
+			if (p->score > best) break;
+			if (drand48() * (p->l - p->k + 1 + cnt) > (double)cnt) {
+				s->n_mm = p->n_mm; s->n_gapo = p->n_gapo; s->n_gape = p->n_gape; s->strand = p->a;
+				s->score = p->score;
+				s->sa = p->k + (bwtint_t)((p->l - p->k + 1) * drand48());
+			}
+			cnt += p->l - p->k + 1;
+		}
+		s->c1 = cnt;
+		for (; i < n_aln; ++i) cnt += aln[i].l - aln[i].k + 1;
+		s->c2 = cnt - s->c1;
+		s->type = s->c1 > 1? BWA_TYPE_REPEAT : BWA_TYPE_UNIQUE;
+	}
+
+	if (n_multi) {
+		int k, rest, n_occ, z = 0;
+		for (k = n_occ = 0; k < n_aln; ++k) {
+			const barracuda_aln1_t *q = aln + k;
+			n_occ += q->l - q->k + 1;
+		}
+		if (s->multi) free(s->multi);
+		if (n_occ > n_multi + 1) { // if there are too many hits, generate none of them
+			s->multi = 0; s->n_multi = 0;
+			return;
+		}
+		/* The following code is more flexible than what is required
+		 * here. In principle, due to the requirement above, we can
+		 * simply output all hits, but the following samples "rest"
+		 * number of random hits. */
+		rest = n_occ > n_multi + 1? n_multi + 1 : n_occ; // find one additional for ->sa
+		s->multi = calloc(rest, sizeof(bwt_multi1_t));
+		for (k = 0; k < n_aln; ++k) {
+			const barracuda_aln1_t *q = aln + k;
+			if (q->l - q->k + 1 <= rest) {
+				bwtint_t l;
+				for (l = q->k; l <= q->l; ++l) {
+					s->multi[z].pos = l;
+					s->multi[z].gap = q->n_gapo + q->n_gape;
+					s->multi[z].mm = q->n_mm;
+					s->multi[z++].strand = q->a;
+				}
+				rest -= q->l - q->k + 1;
+			} else { // Random sampling (http://code.activestate.com/recipes/272884/). In fact, we never come here.
+				int j, i, k;
+				for (j = rest, i = q->l - q->k + 1, k = 0; j > 0; --j) {
+					double p = 1.0, x = drand48();
+					while (x < p) p -= p * j / (i--);
+					s->multi[z].pos = q->l - i;
+					s->multi[z].gap = q->n_gapo + q->n_gape;
+					s->multi[z].mm = q->n_mm;
+					s->multi[z++].strand = q->a;
+				}
+				rest = 0;
+				break;
+			}
+		}
+		s->n_multi = z;
+		for (k = z = 0; k < s->n_multi; ++k)
+			if (s->multi[k].pos != s->sa)
+				s->multi[z++] = s->multi[k];
+		s->n_multi = z < n_multi? z : n_multi;
+	}
+}
+#endif
 
 pe_opt_t *bwa_init_pe_opt()
 {
 	pe_opt_t *po;
 	po = (pe_opt_t*)calloc(1, sizeof(pe_opt_t));
 	po->max_isize = 500;
+	po->force_isize = 0;
 	po->max_occ = 100000;
+	po->n_multi = 0; //changed from (currently disabled) 3;
+	po->N_multi = 0; //changed from (currently disabled) 10;
 	po->type = BWA_PET_STD;
 	po->is_sw = 1;
+	po->ap_prior = 1e-5;
 	return po;
 }
 
@@ -107,20 +244,25 @@ static inline uint64_t hash_64(uint64_t key)
 
 // for normal distribution, this is about 3std
 #define OUTLIER_BOUND 2.0
-//TODO: Update to 0.5.7
-static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii)
+
+static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii, double ap_prior, int64_t L)
 {
-	uint64_t x, *isizes;
-	int n, i, tot, p25, p75, p50;
+	uint64_t x, *isizes, n_ap = 0;
+	int n, i, tot, p25, p75, p50, max_len = 1, tmp;
+	double skewness = 0.0, kurtosis = 0.0, y;
 
 	ii->avg = ii->std = -1.0;
-	ii->low = ii->high = 0;
+	ii->low = ii->high = ii->high_bayesian = 0;
 	isizes = (uint64_t*)calloc(n_seqs, 8);
 	for (i = 0, tot = 0; i != n_seqs; ++i) {
 		bwa_seq_t *p[2];
 		p[0] = seqs[0] + i; p[1] = seqs[1] + i;
-		if (p[0]->mapQ >= 20 && p[1]->mapQ >= 20)
-			isizes[tot++] = (p[0]->pos < p[1]->pos)? p[1]->pos + p[1]->len - p[0]->pos : p[0]->pos + p[0]->len - p[1]->pos;
+		if (p[0]->mapQ >= 20 && p[1]->mapQ >= 20) {
+			x = (p[0]->pos < p[1]->pos)? p[1]->pos + p[1]->len - p[0]->pos : p[0]->pos + p[0]->len - p[1]->pos;
+			if (x < 100000) isizes[tot++] = x;
+		}
+		if (p[0]->len > max_len) max_len = p[0]->len;
+		if (p[1]->len > max_len) max_len = p[1]->len;
 	}
 	if (tot < 20) {
 		fprintf(stderr, "[infer_isize] fail to infer insert size: too few good pairs\n");
@@ -131,25 +273,45 @@ static int infer_isize(int n_seqs, bwa_seq_t *seqs[2], isize_info_t *ii)
 	p25 = isizes[(int)(tot*0.25 + 0.5)];
 	p50 = isizes[(int)(tot*0.50 + 0.5)];
 	p75 = isizes[(int)(tot*0.75 + 0.5)];
-	ii->low  = (int)(p25 - OUTLIER_BOUND * (p75 - p25) + .499);
+	tmp  = (int)(p25 - OUTLIER_BOUND * (p75 - p25) + .499);
+	ii->low = tmp > max_len? tmp : max_len; // ii->low is unsigned
 	ii->high = (int)(p75 + OUTLIER_BOUND * (p75 - p25) + .499);
 	for (i = 0, x = n = 0; i < tot; ++i)
 		if (isizes[i] >= ii->low && isizes[i] <= ii->high)
 			++n, x += isizes[i];
 	ii->avg = (double)x / n;
+	for (i = 0; i < tot; ++i) {
+		if (isizes[i] >= ii->low && isizes[i] <= ii->high) {
+			double tmp = (isizes[i] - ii->avg) * (isizes[i] - ii->avg);
+			ii->std += tmp;
+			skewness += tmp * (isizes[i] - ii->avg);
+			kurtosis += tmp * tmp;
+		}
+	}
+	kurtosis = kurtosis/n / (ii->std / n * ii->std / n) - 3;
+	ii->std = sqrt(ii->std / n); // it would be better as n-1, but n is usually very large
+	skewness = skewness / n / (ii->std * ii->std * ii->std);
+	for (y = 1.0; y < 10.0; y += 0.01)
+		if (.5 * erfc(y / M_SQRT2) < ap_prior / L * (y * ii->std + ii->avg)) break;
+	ii->high_bayesian = (bwtint_t)(y * ii->std + ii->avg + .499);
 	for (i = 0; i < tot; ++i)
-		if (isizes[i] >= ii->low && isizes[i] <= ii->high)
-			ii->std += (isizes[i] - ii->avg) * (isizes[i] - ii->avg);
-	ii->std = sqrt(ii->std / n);
+		if (isizes[i] > ii->high_bayesian) ++n_ap;
+	ii->ap_prior = .01 * (n_ap + .01) / tot;
+	if (ii->ap_prior < ap_prior) ii->ap_prior = ap_prior;
 	free(isizes);
-	if (ii->low <= 0 || isnan(ii->std)) {
-		ii->low = ii->high = 0; ii->avg = ii->std = -1.0;
+	fprintf(stderr, "[infer_isize] (25, 50, 75) percentile: (%d, %d, %d)\n", p25, p50, p75);
+	if (isnan(ii->std) || p75 > 100000) {
+		ii->low = ii->high = ii->high_bayesian = 0; ii->avg = ii->std = -1.0;
 		fprintf(stderr, "[infer_isize] fail to infer insert size: weird pairing\n");
 		return -1;
 	}
-	fprintf(stderr, "[infer_isize] (25, 50, 75) percentile: (%d, %d, %d)\n", p25, p50, p75);
-	fprintf(stderr, "[infer_isize] low and high boundaries: %d and %d\n", ii->low, ii->high);
+	for (y = 1.0; y < 10.0; y += 0.01)
+		if (.5 * erfc(y / M_SQRT2) < ap_prior / L * (y * ii->std + ii->avg)) break;
+	ii->high_bayesian = (bwtint_t)(y * ii->std + ii->avg + .499);
+	fprintf(stderr, "[infer_isize] low and high boundaries: %d and %d for estimating avg and std\n", ii->low, ii->high);
 	fprintf(stderr, "[infer_isize] inferred external isize from %d pairs: %.3lf +/- %.3lf\n", n, ii->avg, ii->std);
+	fprintf(stderr, "[infer_isize] skewness: %.3lf; kurtosis: %.3lf; ap_prior: %.2e\n", skewness, kurtosis, ii->ap_prior);
+	fprintf(stderr, "[infer_isize] inferred maximum insert size: %d (%.2lf sigma)\n", ii->high_bayesian, y);
 	return 0;
 }
 
@@ -179,7 +341,7 @@ static int pairing(bwa_seq_t *p[2], pe_data_t *d, const pe_opt_t *opt, int s_mm,
 #define __pairing_aux2(q, w) do {										\
 		(q)->extra_flag |= SAM_FPP;										\
 		if ((q)->pos != (w)>>32) {										\
-			const bwt_aln1_t *r = d->aln[(w)&1].a + ((uint32_t)(w)>>1);	\
+			const barracuda_aln1_t *r = d->aln[(w)&1].a + ((uint32_t)(w)>>1);	\
 			(q)->n_mm = r->n_mm; (q)->n_gapo = r->n_gapo; (q)->n_gape = r->n_gape; (q)->strand = r->a; \
 			(q)->score = r->score; (q)->mapQ = mapQ_p;					\
 			(q)->pos = (w)>>32;											\
@@ -263,11 +425,12 @@ static int pairing(bwa_seq_t *p[2], pe_data_t *d, const pe_opt_t *opt, int s_mm,
 }
 
 typedef struct {
-	kvec_t(bwt_aln1_t) aln;
+	kvec_t(barracuda_aln1_t) aln;
 } aln_buf_t;
 
+
 int bwa_cal_pac_pos_pe(const char *prefix, int n_seqs, bwa_seq_t *seqs[2], FILE *fp_sa[2], isize_info_t *ii,
-					   const pe_opt_t *opt, const gap_opt_t *gopt, const isize_info_t *last_ii, bwt_t *bwt[2])
+					   const pe_opt_t *opt, const barracuda_gap_opt_t *gopt, const isize_info_t *last_ii, const bwt_t *bwt[2])
 {
 	int i, j, cnt_chg = 0;
 //	char str[1024];
@@ -291,13 +454,14 @@ int bwa_cal_pac_pos_pe(const char *prefix, int n_seqs, bwa_seq_t *seqs[2], FILE 
 		for (j = 0; j < 2; ++j) {
 			int n_aln;
 			p[j] = seqs[j] + i;
+			//p[j]->n_multi = 0;
 			p[j]->extra_flag |= SAM_FPD | (j == 0? SAM_FR1 : SAM_FR2);
 			fread(&n_aln, 4, 1, fp_sa[j]);
 			if (n_aln > kv_max(d->aln[j]))
-				kv_resize(bwt_aln1_t, d->aln[j], n_aln);
+				kv_resize(barracuda_aln1_t, d->aln[j], n_aln);
 			d->aln[j].n = n_aln;
-			fread(d->aln[j].a, sizeof(bwt_aln1_t), n_aln, fp_sa[j]);
-			kv_copy(bwt_aln1_t, buf[j][i].aln, d->aln[j]); // backup d->aln[j]
+			fread(d->aln[j].a, sizeof(barracuda_aln1_t), n_aln, fp_sa[j]);
+			kv_copy(barracuda_aln1_t, buf[j][i].aln, d->aln[j]); // backup d->aln[j]
 			// generate SE alignment and mapping quality
 			bwa_aln2seq(n_aln, d->aln[j].a, p[j]);
 			if (p[j]->type == BWA_TYPE_UNIQUE || p[j]->type == BWA_TYPE_REPEAT) {
@@ -310,15 +474,19 @@ int bwa_cal_pac_pos_pe(const char *prefix, int n_seqs, bwa_seq_t *seqs[2], FILE 
 	}
 
 	// infer isize
-	infer_isize(n_seqs, seqs, ii);
+	infer_isize(n_seqs, seqs, ii, opt->ap_prior, bwt[0]->seq_len);
 	if (ii->avg < 0.0 && last_ii->avg > 0.0) *ii = *last_ii;
+	if (opt->force_isize) {
+		fprintf(stderr, "[%s] discard insert size estimate as user's request.\n", __func__);
+		ii->low = ii->high = 0; ii->avg = ii->std = -1.0;
+	}
 
 	// PE
 	for (i = 0; i != n_seqs; ++i) {
 		bwa_seq_t *p[2];
 		for (j = 0; j < 2; ++j) {
 			p[j] = seqs[j] + i;
-			kv_copy(bwt_aln1_t, d->aln[j], buf[j][i].aln);
+			kv_copy(barracuda_aln1_t, d->aln[j], buf[j][i].aln);
 		}
 		if ((p[0]->type == BWA_TYPE_UNIQUE || p[0]->type == BWA_TYPE_REPEAT)
 			&& (p[1]->type == BWA_TYPE_UNIQUE || p[1]->type == BWA_TYPE_REPEAT))
@@ -334,7 +502,7 @@ int bwa_cal_pac_pos_pe(const char *prefix, int n_seqs, bwa_seq_t *seqs[2], FILE 
 			d->arr.n = 0;
 			for (j = 0; j < 2; ++j) {
 				for (k = 0; k < d->aln[j].n; ++k) {
-					bwt_aln1_t *r = d->aln[j].a + k;
+					barracuda_aln1_t *r = d->aln[j].a + k;
 					bwtint_t l;
 					if (r->l - r->k + 1 >= MIN_HASH_WIDTH) { // then check hash table
 						uint64_t key = (uint64_t)r->k<<32 | r->l;
@@ -363,6 +531,23 @@ int bwa_cal_pac_pos_pe(const char *prefix, int n_seqs, bwa_seq_t *seqs[2], FILE 
 			}
 			cnt_chg += pairing(p, d, opt, gopt->s_mm, ii);
 		}
+#if ENABLE_N_MULTI == 1
+		if (opt->N_multi || opt->n_multi) {
+			for (j = 0; j < 2; ++j) {
+				if (p[j]->type != BWA_TYPE_NO_MATCH) {
+					int k;
+					if (!(p[j]->extra_flag&SAM_FPP) && p[1-j]->type != BWA_TYPE_NO_MATCH) {
+						bwa_aln2seq_core(d->aln[j].n, d->aln[j].a, p[j], 0, p[j]->c1+p[j]->c2-1 > opt->N_multi? opt->n_multi : opt->N_multi);
+					} else bwa_aln2seq_core(d->aln[j].n, d->aln[j].a, p[j], 0, opt->n_multi);
+					for (k = 0; k < p[j]->n_multi; ++k) {
+						bwt_multi1_t *q = p[j]->multi + k;
+						q->pos = q->strand? bwt_sa(bwt[0], q->pos) : bwt[1]->seq_len - (bwt_sa(bwt[1], q->pos) + p[j]->len);
+					}
+				}
+			}
+		}
+
+#endif
 	}
 
 	// free
@@ -379,7 +564,8 @@ int bwa_cal_pac_pos_pe(const char *prefix, int n_seqs, bwa_seq_t *seqs[2], FILE 
 	return cnt_chg;
 }
 
-#define SW_MIN_MATCH_LEN 17
+#define SW_MIN_MATCH_LEN 20
+#define SW_MIN_MAPQ 17
 
 // cnt = n_mm<<16 | n_gapo<<8 | n_gape
 uint16_t *bwa_sw_core(bwtint_t l_pac, const ubyte_t *pacseq, int len, const ubyte_t *seq, int64_t *beg, int reglen,
@@ -564,11 +750,17 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 	clock_t t;
 	bntseq_t *bns, *ntbns = 0;
 	FILE *fp_sa[2];
-	gap_opt_t opt;
+	barracuda_gap_opt_t opt;
 	khint_t iter;
 	isize_info_t last_ii; // this is for the last batch of reads
 
+	// For timing purpose only
+	struct timeval start, end;
+	double time_used = 0, total_time_used = 0;
+
+
 	// initialization
+
 	for (i = 1; i != 256; ++i) g_log_n[i] = (int)(4.343 * log(i) + 0.5);
 	bns = bns_restore(prefix);
 	srand48(bns->seed);
@@ -582,17 +774,31 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 	// load forward SA - original from bwa_cal_pac_pos_pe, moved here to save disk I/O for big bwts
 	bwt_t *bwt[2];
 	char str[1024];
+
+	// open bwts added by brian
+	fprintf(stderr,"[sampe_core] Loading BWTs, please wait..");
+	// load forward & reverse SA
+	gettimeofday (&start, NULL);
+
 	strcpy(str, prefix); strcat(str, ".bwt");  bwt[0] = bwt_restore_bwt(str);
 	strcpy(str, prefix); strcat(str, ".sa"); bwt_restore_sa(str, bwt[0]);
 	strcpy(str, prefix); strcat(str, ".rbwt"); bwt[1] = bwt_restore_bwt(str);
 	strcpy(str, prefix); strcat(str, ".rsa"); bwt_restore_sa(str, bwt[1]);
 
+	gettimeofday (&end, NULL);
+	time_used = diff_in_seconds_pe(&end,&start);
+	total_time_used += time_used;
+
+	fprintf(stderr, "Done! \n[sampe_core] Time used: %0.2fs\n", time_used);
+
+	gettimeofday (&start, NULL);
 	//print SAM header
 	bwa_print_sam_SQ(bns);
+	bwa_print_sam_PG();
 
 	// core loop
-	fread(&opt, sizeof(gap_opt_t), 1, fp_sa[0]);
-	fread(&opt, sizeof(gap_opt_t), 1, fp_sa[1]);
+	fread(&opt, sizeof(barracuda_gap_opt_t), 1, fp_sa[0]);
+	fread(&opt, sizeof(barracuda_gap_opt_t), 1, fp_sa[1]);
 	if (!(opt.mode & BWA_MODE_COMPREAD)) {
 		popt->type = BWA_PET_SOLID;
 		ntbns = bwa_open_nt(prefix);
@@ -606,33 +812,41 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 		tot_seqs += n_seqs;
 		t = clock();
 
-		fprintf(stderr, "[bwa_sai2sam_pe_core] convert to sequence coordinate... \n");
+		fprintf(stderr, "[sampe_core] Mapping SA coordinates to linear space, please wait... \n");
 		cnt_chg = bwa_cal_pac_pos_pe(prefix, n_seqs, seqs, fp_sa, &ii, popt, &opt, &last_ii, bwt);
-		fprintf(stderr, "[bwa_sai2sam_pe_core] time elapses: %.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
-		fprintf(stderr, "[bwa_sai2sam_pe_core] change of coordinates in %d alignments.\n", cnt_chg);
+		fprintf(stderr, "[sampe_core] time elapses: %.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+		fprintf(stderr, "[sampe_core] change of coordinates in %d alignments.\n", cnt_chg);
 
-		fprintf(stderr, "[bwa_sai2sam_pe_core] align unmapped mate...\n");
+		fprintf(stderr, "[sampe_core] align unmapped mate...\n");
 		pacseq = bwa_paired_sw(bns, n_seqs, seqs, popt, &ii);
-		fprintf(stderr, "[bwa_sai2sam_pe_core] time elapses: %.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+		fprintf(stderr, "[sampe_core] time elapses: %.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
 
-		fprintf(stderr, "[bwa_sai2sam_pe_core] refine gapped alignments... ");
+		fprintf(stderr, "[sampe_core] refine gapped alignments...\n");
 		for (j = 0; j < 2; ++j)
 			bwa_refine_gapped(bns, n_seqs, seqs[j], pacseq, ntbns);
-		fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+		//fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+		//fprintf(stderr, ".");
 		free(pacseq);
 
-		fprintf(stderr, "[bwa_sai2sam_pe_core] print alignments... ");
+		fprintf(stderr, "[sampe_core] print alignments... \n");
 		for (i = 0; i < n_seqs; ++i) {
 			bwa_print_sam1(bns, seqs[0] + i, seqs[1] + i, opt.mode, opt.max_top2);
 			bwa_print_sam1(bns, seqs[1] + i, seqs[0] + i, opt.mode, opt.max_top2);
 		}
-		fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+		//fprintf(stderr, ".");
+		//fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
 
 		for (j = 0; j < 2; ++j)
 			bwa_free_read_seq(n_seqs, seqs[j]);
-		fprintf(stderr, "[bwa_sai2sam_pe_core] %d sequences have been processed.\n", tot_seqs);
+		fprintf(stderr, "[sampe_core] %d sequences have been processed.\n", tot_seqs);
 		last_ii = ii;
 	}
+	gettimeofday (&end, NULL);
+	time_used = diff_in_seconds_pe(&end,&start);
+	total_time_used += time_used;
+
+	fprintf(stderr, "\n[sampe_core] Done!\n[sampe_core] Total no. of sequences: %d\n[sampe_core] Total program time: %0.2fs (%0.2f sequences/sec)\n", tot_seqs, total_time_used, (float) tot_seqs/total_time_used);
+
 
 	// destroy
 	bwt_destroy(bwt[0]); bwt_destroy(bwt[1]); // move to here to save disk I/O
@@ -651,38 +865,60 @@ void bwa_sai2sam_pe_core(const char *prefix, char *const fn_sa[2], char *const f
 
 int bwa_sai2sam_pe(int argc, char *argv[])
 {
+
+	fprintf(stderr, "Barracuda, Version %s\n", PACKAGE_VERSION);
+
+	extern char *bwa_rg_line, *bwa_rg_id;
+	extern int bwa_set_rg(const char *s);
 	int c;
 	pe_opt_t *popt;
 	popt = bwa_init_pe_opt();
 
-	fprintf(stderr, "Barracuda, Version 0.6 beta\n");
 
-	while ((c = getopt(argc, argv, "a:o:s")) >= 0) {
+	while ((c = getopt(argc, argv, "a:o:sPn:N:c:f:Ar:")) >= 0) {
 		switch (c) {
+		case 'r':
+			if (bwa_set_rg(optarg) < 0) {
+				fprintf(stderr, "[%s] ERROR!! malformated @RG line! Aborting...\n", __func__);
+				return 1;
+			}
+			break;
 		case 'a': popt->max_isize = atoi(optarg); break;
 		case 'o': popt->max_occ = atoi(optarg); break;
 		case 's': popt->is_sw = 0; break;
+//		case 'P': popt->is_preload = 1; break;
+//		case 'n': popt->n_multi = atoi(optarg); break;
+//		case 'N': popt->N_multi = atoi(optarg); break;
+		case 'c': popt->ap_prior = atof(optarg); break;
+//		case 'f': xreopen(optarg, "w", stdout); break;
+		case 'A': popt->force_isize = 1; break;
 		default: return 1;
 		}
 	}
 
 	if (optind + 5 > argc) {
-		fprintf(stderr, "\nSAM pair-end alignment output module");
+		fprintf(stderr, "\nSAM paired-end alignment output module\n");
 		fprintf(stderr, "\n");
-		fprintf(stderr, "\n");
-		fprintf(stderr, "Usage:   barracuda sampe [options] <reference.fa> <reads1.sai> <reads2.sai> <reads1.fastq> <reads2.fastq>\n\n");
-		fprintf(stderr, "\n");
-		fprintf(stderr, "Options: \n");
-		fprintf(stderr, "         -a INT   maximum insert size [%d]\n", popt->max_isize);
+		fprintf(stderr, "Usage:   barracuda sampe [options] <reference.fa> <in1.sai> <in2.sai> <in1.fastq> <in2.fastq>\n\n");
+		fprintf(stderr, "Options: -a INT   maximum insert size [%d]\n", popt->max_isize);
 		fprintf(stderr, "         -o INT   maximum occurrences for one end [%d]\n", popt->max_occ);
-		fprintf(stderr, "         -s       disable Smith-Waterman for the unmapped mate\n\n");
-		fprintf(stderr, "Notes: 1. For SOLiD read, <in1.fq> corresponds R3 reads and <in2.fq> to F3.\n");
+//		fprintf(stderr, "         -n INT   maximum hits to output for paired reads [%d]\n", popt->n_multi);
+//		fprintf(stderr, "         -N INT   maximum hits to output for discordant pairs [%d]\n", popt->N_multi);
+		fprintf(stderr, "         -c FLOAT prior of chimeric rate (lower bound) [%.1le]\n", popt->ap_prior);
+//      fprintf(stderr, "         -f FILE  sam file to output results to [stdout]\n");
+		fprintf(stderr, "         -r STR   read group header line such as `@RG\\tID:foo\\tSM:bar' [null]\n");
+//		fprintf(stderr, "         -P       preload index into memory (for base-space reads only)\n");
+		fprintf(stderr, "         -s       disable Smith-Waterman for the unmapped mate\n");
+		fprintf(stderr, "         -A       disable insert size estimate (force -s)\n\n");
+		fprintf(stderr, "Notes: 1. For SOLiD reads, <in1.fq> corresponds R3 reads and <in2.fq> to F3.\n");
 		fprintf(stderr, "       2. For reads shorter than 30bp, applying a smaller -o is recommended to\n");
 		fprintf(stderr, "          to get a sensible speed at the cost of pairing accuracy.\n");
 		fprintf(stderr, "\n");
 		return 1;
 	}
 	bwa_sai2sam_pe_core(argv[optind], argv + optind + 1, argv + optind+3, popt);
+	free(bwa_rg_line); free(bwa_rg_id);
 	free(popt);
 	return 0;
 }
+

@@ -1520,6 +1520,8 @@ void BWTSaveBwtCodeAndOcc(const BWT *bwt, const char *bwtFileName, const char *o
 
 void bwt_bwtgen(const char *fn_pac, const char *fn_bwt)
 {
+
+	fprintf(stderr,"[bwa_index]   Constructing BWT using 'bwtsw' algorithm.  This will take a while, please wait...\n");
 	BWTInc *bwtInc;
 	bwtInc = BWTIncConstructFromPacked(fn_pac, 2.5, 10000000, 10000000);
 	printf("[bwt_gen] Finished constructing BWT in %u iterations.\n", bwtInc->numberOfIterationDone);

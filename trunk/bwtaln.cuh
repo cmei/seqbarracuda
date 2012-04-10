@@ -15,15 +15,16 @@
 // "strand_type", bits 1-2 are "type", bit 3 is "strand" in 
 // corresponding to CPU struct "bwa_seq_t".  
 // 
-
 typedef struct __align__(16)
 {
 	uint32_t len;
+	//uint8_t strand_type;
 	uint8_t strand;
 	uint8_t type;
 	uint8_t n_mm;
 	uint32_t c1;
 	uint32_t c2;
+	
 } bwa_maxdiff_mapQ_t;
 
 
@@ -34,34 +35,35 @@ typedef struct __align__(16)
 ///////////////////////////////////////////////////////////////
 
 
-__device__ 
-void bwt_rbwt_cuda_2occ(
-    unsigned int k, 
-    unsigned int l, 
-    unsigned char c, 
-    unsigned int *ok, 
-    unsigned int *ol, 
-    unsigned short bwt_type);
-
 ///////////////////////////////////////////////////////////////
 // Begin bwa_cal_pac_pos_cuda (Dag's test)
 ///////////////////////////////////////////////////////////////
 
 void print_cuda_info();
 
+__device__ ubyte_t _bwt_B0(const bwt_t *b, bwtint_t k);
 
-__device__ inline uint4 BWT_RBWT_OCC4b(uint32_t coord_1D,char strand);
+__device__ ubyte_t _bwt_B02(bwtint_t k);
 
-__device__ ubyte_t bwt_rbwt_B0(bwtint_t k,char strand);
+__device__ ubyte_t _rbwt_B02(bwtint_t k);
 
+__device__ ubyte_t _bwt_B03(bwtint_t k, texture<uint4, 1, cudaReadModeElementType> *b);
 
-__device__ uint32_t bwt_rbwt_bwt(bwtint_t k,char strand);
+__device__ uint32_t _bwt_bwt(const bwt_t *b, bwtint_t k);
 
-__device__ inline void Conv1DTo2D1(int *coord12D,int *coord22D,int coord1D);
+__device__ uint32_t _bwt_bwt2(bwtint_t k);
 
-__device__ inline void Conv1DTo2D4(int *coord12D,int *coord22D,int coord1D);
+__device__ uint32_t _rbwt_bwt2(bwtint_t k);
+
+__device__ uint32_t _bwt_bwt3(bwtint_t k, texture<uint4, 1, cudaReadModeElementType> *b);
+
+__device__ inline uint32_t* _bwt_occ_intv(const bwt_t *b, bwtint_t k);
 
 __device__ int cuda_bwa_approx_mapQ(const bwa_maxdiff_mapQ_t *p, int mm);
+
+__device__ int cuda_bwa_cal_maxdiff(int l, double err, double thres);
+
+
 
 __device__ 
 void update_indices(
@@ -70,12 +72,16 @@ void update_indices(
     int *n_sa_in_buf,
     int *n_sa_buf_empty);
 
+
+
 __device__ 
 void update_indices_in_parallel(
     int *n_sa_processed,
     int *n_sa_remaining,
     int *n_sa_in_buf,
     int *n_sa_buf_empty);
+
+
 
 __device__ 
 void fetch_read_new_in_parallel(
@@ -90,6 +96,8 @@ void fetch_read_new_in_parallel(
     int *sa_next_no,
     const int n_sa_total);
 
+
+
 __device__ 
 void sort_reads(
     bwtint_t *sa_buf_arr,
@@ -99,11 +107,10 @@ void sort_reads(
     const int *n_sa_in_buf,
     int *n_sa_in_buf_prev);
 
-__global__ 
-void copy_stuff (bwtint_t *B0_de, bwtint_t len);
+
 
 __global__
-void cuda_bwa_cal_pac_pos_parallel1(
+void cuda_bwa_cal_pac_pos_parallel2(
     uint8_t *seqs_mapQ_de,
     bwtint_t *seqs_pos_de,
     const bwa_maxdiff_mapQ_t *seqs_maxdiff_mapQ_de,
@@ -113,23 +120,16 @@ void cuda_bwa_cal_pac_pos_parallel1(
     int n_seq_per_block,
     int block_mod,
     int max_mm,
-    float fnr,
-    int bwt_sa_intv,
-    int rbwt_sa_intv);
-
-void calc_n_block1(
-    int *n_sp_to_use, 
-    int *n_block, 
-    int *n_seq_per_block, 
-    int *block_mod, 
-    int n_mp_on_device, 
-    int n_sp_per_mp, 
-    int n_seqs);
-
+    float fnr);
+    
 
 ///////////////////////////////////////////////////////////////
 // End bwa_cal_pac_pos_cuda (Dag's test)
 ///////////////////////////////////////////////////////////////
+
+
+
+
 
 
 

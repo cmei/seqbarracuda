@@ -8,7 +8,7 @@
 #define USE_STACK_TABLE 0
 #define MAX_NO_OF_GAP_ENTRIES 512
 
-gap_stack_t *gap_init_stack(int max_mm, int max_gapo, int max_gape, const gap_opt_t *opt)
+gap_stack_t *gap_init_stack(int max_mm, int max_gapo, int max_gape, const barracuda_gap_opt_t *opt)
 {
 	int i;
 	gap_stack_t *stack;
@@ -43,7 +43,7 @@ static void gap_reset_stack(gap_stack_t *stack)
 
 
 static inline void gap_push(gap_stack_t *stack, int a, int i, bwtint_t k, bwtint_t l, int n_mm, int n_gapo, int n_gape,
-							int state, int is_diff, const gap_opt_t *opt)
+							int state, int is_diff, const barracuda_gap_opt_t *opt)
 {
 
 	int score;
@@ -104,19 +104,19 @@ static inline int int_log2(uint32_t v)
 	return c;
 }
 
-bwt_aln1_t *bwt_match_gap(bwt_t *const bwts[2], int len, const ubyte_t *seq[2], bwt_width_t *w[2], bwt_width_t *seed_w[2], const gap_opt_t *opt, int *_n_aln, gap_stack_t *stack)
+barracuda_aln1_t *bwt_match_gap(bwt_t *const bwts[2], int len, const ubyte_t *seq[2], bwt_width_t *w[2], bwt_width_t *seed_w[2], const barracuda_gap_opt_t *opt, int *_n_aln, gap_stack_t *stack)
 {
 	int best_score = aln_score(opt->max_diff+1, opt->max_gapo+1, opt->max_gape+1, opt);
 	int best_diff = opt->max_diff + 1, max_diff = opt->max_diff;
 	int best_cnt = 0;
 	//int max_entries = 0;
 	int j, _j, n_aln, m_aln;
-	bwt_aln1_t *aln;
+	barracuda_aln1_t *aln;
 
 
 
 	m_aln = 4; n_aln = 0;
-	aln = (bwt_aln1_t*)calloc(m_aln, sizeof(bwt_aln1_t));
+	aln = (barracuda_aln1_t*)calloc(m_aln, sizeof(barracuda_aln1_t));
 
 	//printf("Forward Sequence:");
 	// check whether there are too many N
@@ -234,12 +234,12 @@ bwt_aln1_t *bwt_match_gap(bwt_t *const bwts[2], int len, const ubyte_t *seq[2], 
 
 			if (do_add) { // append result the alignment record array
 
-				bwt_aln1_t *p;
+				barracuda_aln1_t *p;
 				gap_shadow(l - k + 1, len, bwt->seq_len, e.last_diff_pos, width);
 				if (n_aln == m_aln) {
 					m_aln <<= 1;
-					aln = (bwt_aln1_t*)realloc(aln, m_aln * sizeof(bwt_aln1_t));
-					memset(aln + m_aln/2, 0, m_aln/2*sizeof(bwt_aln1_t));
+					aln = (barracuda_aln1_t*)realloc(aln, m_aln * sizeof(barracuda_aln1_t));
+					memset(aln + m_aln/2, 0, m_aln/2*sizeof(barracuda_aln1_t));
 				}
 				p = aln + n_aln;
 				// record down number of mismatch, gap open, gap extension and a??

@@ -82,11 +82,16 @@ bwt_t *bwt_pac2bwt(const char *fn_pac, int use_is)
 
 	// Burrows-Wheeler Transform
 	if (use_is) {
+
+		fprintf(stderr,"[bwa_index]   Constructing BWT using 'is' algorithm.  This will take a while,  please wait...\n");
 		bwt->primary = is_bwt(buf, bwt->seq_len);
 	} else {
 #ifdef _DIVBWT
+		fprintf(stderr,"[bwa_index]   Constructing BWT using 'DIV' algorithm.  This will take a while,  please wait...\n");
 		bwt->primary = divbwt(buf, buf, 0, bwt->seq_len);
 #else
+
+		fprintf(stderr,"[bwa_index]   Constructing BWT using 'DIV' algorithm.  This will take a while,  please wait...\n");
 		err_fatal_simple("libdivsufsort is not compiled in.");
 #endif
 	}
